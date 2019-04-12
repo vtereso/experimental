@@ -1,12 +1,13 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# go build binaries
+main
+experimental
 
-# Test binary, build with `go test -c`
-*.test
+# intellij
+.idea/
+*.iml
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
+# scripts/verify.sh creates a vendor for metalinter
+vendor/
+
+# go artifacts
+cover.out
