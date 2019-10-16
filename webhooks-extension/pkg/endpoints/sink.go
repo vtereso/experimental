@@ -16,16 +16,17 @@ package endpoints
 import (
 	"errors"
 	"fmt"
-	restful "github.com/emicklei/go-restful"
-	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
-	v1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
-	gh "gopkg.in/go-playground/webhooks.v3/github"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	restful "github.com/emicklei/go-restful"
+	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
+	v1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
+	gh "gopkg.in/go-playground/webhooks.v3/github"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const gitServerLabel = "gitServer"
@@ -83,7 +84,7 @@ func (r Resource) handleWebhook(request *restful.Request, response *restful.Resp
 		buildInformation.TIMESTAMP = timestamp
 		buildInformation.BRANCH = extractBranchFromRef(webhookData.Ref)
 
-		createPipelineRunFromWebhookData(buildInformation, r)
+		createPipelineRunFromWebhookData(buildInformation, r, gitHubEventType)
 		logging.Log.Debugf("Build information for repository %s:%s: %s.", buildInformation.REPOURL, buildInformation.SHORTID, buildInformation)
 
 	} else if gitHubEventTypeString == "pull_request" {
@@ -104,10 +105,10 @@ func (r Resource) handleWebhook(request *restful.Request, response *restful.Resp
 		buildInformation.TIMESTAMP = timestamp
 		buildInformation.BRANCH = extractBranchFromRef(webhookData.PullRequest.Head.Ref)
 
-		pipelinerun := createPipelineRunFromWebhookData(buildInformation, r)
+		pipelinerun := createPipelineRunFromWebhookData(buildInformation, r, gitHubEventType)
 		logging.Log.Debugf("Build information for repository %s:%s: %s.", buildInformation.REPOURL, buildInformation.SHORTID, buildInformation)
 		createTaskRunFromWebhookData(buildInformation, r, pipelinerun)
-		logging.Log.Debugf("created monitoring task for pipelinerun from build information for repository %s commitId %s.", buildInformation.REPOURL, 
+		logging.Log.Debugf("created monitoring task for pipelinerun from build information for repository %s commitId %s.", buildInformation.REPOURL,
 			buildInformation.SHORTID)
 	} else {
 		logging.Log.Errorf("error: event wasn't a push, pull, or ping event, no action will be taken. Request is: %+v.", request)
@@ -129,7 +130,7 @@ func extractBranchFromRef(ref string) string {
 }
 
 // This is the main flow that handles building and deploying: given everything we need to kick off a build, do so
-func createPipelineRunFromWebhookData(buildInformation BuildInformation, r Resource) (result *v1alpha1.PipelineRun){
+func createPipelineRunFromWebhookData(buildInformation BuildInformation, r Resource, eventType string) (result *v1alpha1.PipelineRun) {
 	logging.Log.Debugf("In createPipelineRunFromWebhookData, build information: %s.", buildInformation)
 
 	// TODO: Use the dashboard endpoint to create the PipelineRun
@@ -225,7 +226,8 @@ func createPipelineRunFromWebhookData(buildInformation BuildInformation, r Resou
 		{Name: "image-name", Value: imageName},
 		{Name: "release-name", Value: releaseName},
 		{Name: "repository-name", Value: repositoryName},
-		{Name: "target-namespace", Value: pipelineNs}}
+		{Name: "target-namespace", Value: pipelineNs},
+		{Name: "event-type", Value: eventType}}
 
 	if dockerRegistry != "" {
 		params = append(params, v1alpha1.Param{Name: "docker-registry", Value: dockerRegistry})
@@ -326,8 +328,8 @@ func createTaskRunFromWebhookData(buildInformation BuildInformation, r Resource,
 
 	params := []v1alpha1.Param{{Name: "commentsuccess", Value: OnSuccessComment},
 		{Name: "commentfailure", Value: OnFailureComment},
-		{Name: "pipelinerun", Value: pipelineRunName },
-		{Name: "pipelinerunnamespace", Value: pipelineRunNs }}
+		{Name: "pipelinerun", Value: pipelineRunName},
+		{Name: "pipelinerunnamespace", Value: pipelineRunNs}}
 
 	// TaskRun yml defines the references to the above named resources.
 	taskRunData, err := defineTaskRun(generatedTaskRunName, installNs, saName, buildInformation.REPOURL, buildInformation.BRANCH,
@@ -388,6 +390,7 @@ func definePipelineResource(name, namespace string, params []v1alpha1.Param, sec
 	resourcePointer := &pipelineResource
 	return resourcePointer
 }
+
 /* Create a new PipelineRun - repoUrl, resourceBinding and params can be nill depending on the Pipeline
 each PipelineRun has a 1 hour timeout: */
 func definePipelineRun(pipelineRunName, namespace, saName, repoURL, branch string,
@@ -419,7 +422,7 @@ func definePipelineRun(pipelineRunName, namespace, saName, repoURL, branch strin
 		},
 
 		Spec: v1alpha1.PipelineRunSpec{
-			PipelineRef: v1alpha1.PipelineRef{Name: pipeline.Name},
+			PipelineRef:    v1alpha1.PipelineRef{Name: pipeline.Name},
 			ServiceAccount: saName,
 			Timeout:        &metav1.Duration{Duration: 1 * time.Hour},
 			Resources:      resourceBinding,
@@ -435,7 +438,7 @@ func definePipelineRun(pipelineRunName, namespace, saName, repoURL, branch strin
 each TaskRun has a 1 hour timeout: */
 func defineTaskRun(taskRunName, namespace, saName, repoURL string, branch string,
 	task v1alpha1.Task,
-	pipelineRunRef  *v1alpha1.PipelineRun,
+	pipelineRunRef *v1alpha1.PipelineRun,
 	resourceBinding []v1alpha1.TaskResourceBinding,
 	params []v1alpha1.Param) (*v1alpha1.TaskRun, error) {
 
@@ -460,30 +463,30 @@ func defineTaskRun(taskRunName, namespace, saName, repoURL string, branch string
 				gitRepoLabel:   gitRepo,
 				gitBranchLabel: branch,
 			},
-//  The following lines cause an issue with the persistent volume claim in the Docker for Desktop
-//  The task created in the installed namespace must be garbage collected until the issue is fixed.
-//  This issue is related to https://github.com/tektoncd/pipeline/issues/1076
-//
-//			OwnerReferences: []metav1.OwnerReference{
-//				{
-//					APIVersion: "tekton.dev/v1alpha1",
-//					Kind: "PipelineRun",
-//					Name: pipelineRunRef.GetName(),
-//					UID:  pipelineRunRef.GetUID(),
-//				},
-//			},
+			//  The following lines cause an issue with the persistent volume claim in the Docker for Desktop
+			//  The task created in the installed namespace must be garbage collected until the issue is fixed.
+			//  This issue is related to https://github.com/tektoncd/pipeline/issues/1076
+			//
+			//			OwnerReferences: []metav1.OwnerReference{
+			//				{
+			//					APIVersion: "tekton.dev/v1alpha1",
+			//					Kind: "PipelineRun",
+			//					Name: pipelineRunRef.GetName(),
+			//					UID:  pipelineRunRef.GetUID(),
+			//				},
+			//			},
 		},
 
 		Spec: v1alpha1.TaskRunSpec{
 			TaskRef:        &v1alpha1.TaskRef{Name: task.Name},
 			ServiceAccount: saName,
 			Timeout:        &metav1.Duration{Duration: 1 * time.Hour},
-			Inputs:  v1alpha1.TaskRunInputs{
-				Resources:      resourceBinding,
-				Params:         params,
+			Inputs: v1alpha1.TaskRunInputs{
+				Resources: resourceBinding,
+				Params:    params,
 			},
-			Outputs:  v1alpha1.TaskRunOutputs{
-				Resources:      resourceBinding,
+			Outputs: v1alpha1.TaskRunOutputs{
+				Resources: resourceBinding,
 			},
 		},
 	}
