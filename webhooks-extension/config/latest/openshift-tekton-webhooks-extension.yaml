@@ -86,6 +86,8 @@ rules:
   - pipelineruns
   - pipelineresources
   - eventlisteners
+  - triggerbindings
+  - triggertemplates
   verbs:
   - get
   - list
