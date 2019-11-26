@@ -14,30 +14,29 @@ limitations under the License.
 package utils
 
 import (
-	"strings"
+	"fmt"
+	"net/http"
 
 	restful "github.com/emicklei/go-restful"
 	logging "github.com/tektoncd/dashboard/pkg/logging"
 )
 
-// RespondError - logs and writes an error response with a desired status code
-func RespondError(response *restful.Response, err error, statusCode int) {
-	logging.Log.Error("Error: ", strings.Replace(err.Error(), "/", "", -1))
-	response.AddHeader("Content-Type", "text/plain")
-	response.WriteError(statusCode, err)
+// RespondError logs the error, sets the status status code and writes the error
+// string as plain text to the response
+func RespondError(response http.ResponseWriter, err error, statusCode int) {
+	logging.Log.Error(err)
+	response.WriteHeader(statusCode)
+	response.Header().Add("Content-Type", "text/plain")
+	response.Write([]byte(err.Error()))
 }
 
-// RespondErrorMessage - logs and writes an error message with a desired status code
-func RespondErrorMessage(response *restful.Response, message string, statusCode int) {
-	logging.Log.Debugf("Error message: %s", message)
-	response.AddHeader("Content-Type", "text/plain")
-	response.WriteErrorString(statusCode, message)
-}
-
-// RespondMessageAndLogError - logs and writes an error message with a desired status code and logs the error
-func RespondMessageAndLogError(response *restful.Response, err error, message string, statusCode int) {
-	logging.Log.Error("Error: ", strings.Replace(err.Error(), "/", "", -1))
-	logging.Log.Debugf("Message: %s", message)
-	response.AddHeader("Content-Type", "text/plain")
-	response.WriteErrorString(statusCode, message)
+// WriteResponseLocation sets the http response "Content-Location" header and
+// sets the status code to 201 for POST requests
+func WriteResponseLocation(request *restful.Request, response *restful.Response, identifier string) {
+	if request.Request.Method != http.MethodPost {
+		return
+	}
+	location := fmt.Sprintf("%s/%s", request.Request.URL.Path, identifier)
+	response.AddHeader("Content-Location", location)
+	response.WriteHeader(http.StatusCreated)
 }

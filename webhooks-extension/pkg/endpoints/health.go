@@ -19,24 +19,7 @@ import (
 	restful "github.com/emicklei/go-restful"
 )
 
-func checkHealth(request *restful.Request, response *restful.Response) {
+// CheckHealth responds to http requests with http 204
+func CheckHealth(request *restful.Request, response *restful.Response) {
 	response.WriteHeader(http.StatusNoContent)
-}
-
-// RegisterLivenessWebService registers the liveness web service
-func (r Resource) RegisterLivenessWebService(container *restful.Container) {
-	ws := new(restful.WebService)
-	ws.Path("/liveness")
-	ws.Route(ws.GET("").To(checkHealth))
-
-	container.Add(ws)
-}
-
-// RegisterReadinessWebService registers the readiness web service
-func (r Resource) RegisterReadinessWebService(container *restful.Container) {
-	ws := new(restful.WebService)
-	ws.Path("/readiness")
-	ws.Route(ws.GET("").To(checkHealth))
-
-	container.Add(ws)
 }

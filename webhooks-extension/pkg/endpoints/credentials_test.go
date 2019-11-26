@@ -14,293 +14,213 @@ limitations under the License.
 package endpoints
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"net/http"
-	"net/http/httptest"
-	"reflect"
-	"strings"
+	"math/rand"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestCreateBadAccessToken(t *testing.T) {
-	r := dummyResource()
-	badAccessToken := credential{
-		Name: "badToken",
-	}
-	expectedError := fmt.Sprintf("error: AccessToken must be specified")
-	createAndCheckCredential(badAccessToken, expectedError, r, t)
-
-	// Verify no credentials have been created
-	checkCredentials([]credential{}, "", r, t)
+func init() {
+	src = rand.NewSource(0)
 }
 
-func TestAccessTokenWithSecret(t *testing.T) {
-	r := dummyResource()
+// func TestCreateCredential(t *testing.T) {
 
-	accessTokenWithSecret := credential{
-		Name:        "accesstoken-with-secret",
-		AccessToken: "alongstringofcharacters",
-		SecretToken: "thisIsMySecretToken",
+// }
+
+// func TestDeleteCredential(t *testing.T) {
+
+// }
+
+// func TestGetAllCredentials(t *testing.T) {
+
+// }
+
+func Test_credentialRequestToSecret(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace string
+		cred      credentialRequest
+		secret    *corev1.Secret
+	}{
+		{
+			name:      "Cred 1",
+			namespace: "ns1",
+			cred: credentialRequest{
+				Name:        "cred1",
+				AccessToken: "token1",
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cred1",
+					Namespace: "ns1",
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{
+					accessToken: []byte("token1"),
+					secretToken: getRandomToken(),
+				},
+			},
+		},
+		{
+			name:      "Cred 2",
+			namespace: "ns2",
+			cred: credentialRequest{
+				Name:        "cred2",
+				AccessToken: "token2",
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cred2",
+					Namespace: "ns2",
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{
+					accessToken: []byte("token2"),
+					secretToken: getRandomToken(),
+				},
+			},
+		},
 	}
-	createAndCheckCredential(accessTokenWithSecret, "", r, t)
-}
-
-// Should be "default" which is r.dummyResource.namespace's value
-
-func TestAccessTokenWithNoNamespaceUsesDefault(t *testing.T) {
-	r := dummyResource()
-
-	accessTokenNoNamespace := credential{
-		Name:        "accesstoken",
-		AccessToken: "anotherlongstringofcharacters",
-		SecretToken: "thisIsMySecretToken",
-	}
-
-	jsonBody, _ := json.Marshal(accessTokenNoNamespace)
-	t.Logf("json body for create cred test with no namespace: %s", jsonBody)
-	httpReq := dummyHTTPRequest("POST", "http://wwww.dummy.com:8383/webhooks/credentials", bytes.NewBuffer(jsonBody))
-	req := dummyRestfulRequest(httpReq, "")
-	httpWriter := httptest.NewRecorder()
-	resp := dummyRestfulResponse(httpWriter)
-	r.createCredential(req, resp)
-
-	httpReq = dummyHTTPRequest("GET", "http://wwww.dummy.com:8383/webhooks/credentials", bytes.NewBuffer(nil))
-	req = dummyRestfulRequest(httpReq, "")
-	httpWriter = httptest.NewRecorder()
-	resp = dummyRestfulResponse(httpWriter)
-	r.getAllCredentials(req, resp)
-
-	result := []credential{}
-	b, err := ioutil.ReadAll(httpWriter.Body)
-	if err != nil {
-		t.Fatalf("FAIL: ERROR - reading response body: %s", err.Error())
-	}
-	err = json.Unmarshal(b, &result)
-
-	t.Logf("unmarshalled result '%+v'", result)
-
-	if result[0].Name != accessTokenNoNamespace.Name {
-		t.Fatalf("Result came back with name %s but expected %s", result[0].Name, accessTokenNoNamespace.Name)
-	}
-
-	// Finally check that result has a SecretToken set and it's starred out
-	if result[0].SecretToken != "********" {
-		t.Fatalf("Result came back with something other than eight chars for the secret token: '%s'", result[0].SecretToken)
-	}
-
-}
-
-func TetAccessTokenWithNoSecret(t *testing.T) {
-	r := dummyResource()
-
-	accessTokenNoSecret := credential{
-		Name:        "accesstoken-nosecret",
-		AccessToken: "anotherlongstringofcharacters",
-	}
-
-	jsonBody, _ := json.Marshal(accessTokenNoSecret)
-	t.Logf("json body for create cred test: %s", jsonBody)
-	httpReq := dummyHTTPRequest("POST", "http://wwww.dummy.com:8383/webhooks/credentials", bytes.NewBuffer(jsonBody))
-	req := dummyRestfulRequest(httpReq, "")
-	httpWriter := httptest.NewRecorder()
-	resp := dummyRestfulResponse(httpWriter)
-	r.createCredential(req, resp)
-
-	httpReq = dummyHTTPRequest("GET", "http://wwww.dummy.com:8383/webhooks/credentials", bytes.NewBuffer(nil))
-	req = dummyRestfulRequest(httpReq, "")
-	httpWriter = httptest.NewRecorder()
-	resp = dummyRestfulResponse(httpWriter)
-	r.getAllCredentials(req, resp)
-
-	result := []credential{}
-	b, err := ioutil.ReadAll(httpWriter.Body)
-	if err != nil {
-		t.Fatalf("FAIL: ERROR - reading response body: %s", err.Error())
-	}
-	err = json.Unmarshal(b, &result)
-
-	t.Logf("unmarshalled result '%+v'", result)
-
-	if result[0].Name != accessTokenNoSecret.Name {
-		t.Fatalf("Result came back with name %s but expected %s", result[0].Name, accessTokenNoSecret.Name)
-	}
-	// Finally check that result has a SecretToken set
-	if strings.Count(result[0].SecretToken, "") < 20 {
-		t.Fatalf("Result came back with less than twenty chars of secret token: '%s'", result[0].SecretToken)
-	}
-
-}
-
-func TestDeleteCredential(t *testing.T) {
-	r := dummyResource()
-	accessTokenToDelete := credential{
-		Name:        "accesstokenToDelete",
-		AccessToken: "sdkfhighregusfbliusbbbwhfwiehw8hwefhw938hf497fhw97b47",
-		SecretToken: "provideASecretTokenSoThatCreateAndCheckCredCanDoDeepEquals",
-	}
-	createAndCheckCredential(accessTokenToDelete, "", r, t)
-
-	httpReq := dummyHTTPRequest("DELETE", "http://wwww.dummy.com:8383/webhooks/credentials", bytes.NewBuffer(nil))
-
-	req := dummyRestfulRequest(httpReq, "accesstokenToDelete")
-	httpWriter := httptest.NewRecorder()
-	resp := dummyRestfulResponse(httpWriter)
-	r.deleteCredential(req, resp)
-
-	creds := r.getK8sCredentials()
-	if len(creds) > 0 {
-		t.Fatalf("Namespace %s should contain no credentials, but we found %+v", r.Defaults.Namespace, creds)
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			secret := credentialRequestToSecret(tests[i].cred, tests[i].namespace)
+			if diff := cmp.Diff(tests[i].secret, secret); diff != "" {
+				t.Errorf("credentialToSecret() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
-func TestDeleteACredentialThatDoesNotExist(t *testing.T) {
-	r := dummyResource()
-	httpReq := dummyHTTPRequest("DELETE", "http://wwww.dummy.com:8383/webhooks/credentials", bytes.NewBuffer(nil))
-	req := dummyRestfulRequest(httpReq, "accesstokenToDelete")
-	httpWriter := httptest.NewRecorder()
-	resp := dummyRestfulResponse(httpWriter)
-	r.deleteCredential(req, resp)
-	if resp.StatusCode() != http.StatusNotFound {
-		t.Fatalf("Expected 404 deleting non-existent credential but got %d", resp.StatusCode())
+func Test_secretToCredentialResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		cred   credentialResponse
+		secret *corev1.Secret
+	}{
+		{
+			name:      "Cred 1",
+			namespace: "ns1",
+			cred: credentialResponse{
+				Name:        "cred1",
+				AccessToken: "token1",
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cred1",
+					Namespace: "ns1",
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{
+					accessToken: []byte("token1"),
+					secretToken: getRandomToken(),
+				},
+			},
+		},
+		{
+			name:      "Cred 2",
+			namespace: "ns2",
+			cred: credentialResponse{
+				Name:        "cred2",
+				AccessToken: "token2",
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cred2",
+					Namespace: "ns2",
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{
+					accessToken: []byte("token2"),
+					secretToken: getRandomToken(),
+				},
+			},
+		},
+	}
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			secret := secretToCredentialResponse(tests[i].cred, tests[i].namespace)
+			if diff := cmp.Diff(tests[i].secret, secret); diff != "" {
+				t.Errorf("credentialToSecret() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
-//----------------------------------------
-// end of Tests. Helper functions below.
-//----------------------------------------
-
-// SecretTokens are twenty characters randomly selected from a set of sixty one. 61^20=5.08e35. We should 'never' get the same token twice.
-func TestRandomStringGenerator(t *testing.T) {
-	tokens := make(map[string]bool)
-	for i := 0; i < 100; i++ {
-		token := string(getRandomSecretToken())
-		if tokens[token] == true {
-			t.Fatalf("Generated the same token twice in less than a hundred tries! map=%+v", tokens)
-		}
-		tokens[token] = true
+func Test_getRandomToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		bytes []byte
+	}{
+		{
+			name:  "Random Token",
+			bytes: []byte("Ze7gKS3PSbsRMjIFYHmz"),
+		},
+		{
+			name:  "Another Random Token",
+			bytes: []byte("Ze7gKS3PSbsRMjIFYHmz"),
+		},
+	}
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			bytes := getRandomToken()
+			if diff := cmp.Diff(tests[i].bytes, bytes); diff != "" {
+				t.Errorf("getRandomToken() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
-func createAndCheckCredential(cred credential, expectError string, r *Resource, t *testing.T) {
-	t.Logf("CREATE credential %+v", cred)
-
-	// Create dummy rest api request and response
-	jsonBody, _ := json.Marshal(cred)
-	t.Logf("json body for create cred test: %s", jsonBody)
-	url := "http://wwww.dummy.com:8383/webhooks/credentials"
-	httpReq := dummyHTTPRequest("POST", url, bytes.NewBuffer(jsonBody))
-	req := dummyRestfulRequest(httpReq, "")
-	httpWriter := httptest.NewRecorder()
-	resp := dummyRestfulResponse(httpWriter)
-	r.createCredential(req, resp)
-
-	// Sometimes we expect an error here, in which case no credential will have been created.
-	if expectError != "" {
-		resultCred := credential{}
-		checkResponseError(httpWriter.Body, &resultCred, expectError, t)
-	} else {
-		compareCredentials(r.getK8sCredential(cred.Name), cred, t)
+func Test_isCredential(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret corev1.Secret
+		isCred bool
+	}{
+		// Correct
+		{
+			name: "AccessToken And SecretToken",
+			secret: corev1.Secret{
+				Data: map[string][]byte{
+					accessToken: []byte("accessToken"),
+					secretToken: []byte("secretToken"),
+				},
+			},
+			isCred: true,
+		},
+		// Incorrect
+		{
+			name: "AccessToken Only",
+			secret: corev1.Secret{
+				Data: map[string][]byte{
+					accessToken: []byte("accessToken"),
+				},
+			},
+			isCred: false,
+		},
+		{
+			name: "SecretToken Only",
+			secret: corev1.Secret{
+				Data: map[string][]byte{
+					secretToken: []byte("secretToken"),
+				},
+			},
+			isCred: false,
+		},
+		{
+			name:   "Empty Secret",
+			secret: corev1.Secret{},
+			isCred: false,
+		},
 	}
-}
-
-func (r Resource) getK8sCredentials() (credentials []credential) {
-	secrets, err := r.K8sClient.CoreV1().Secrets(r.Defaults.Namespace).List(metav1.ListOptions{})
-	if err != nil {
-		return
-	}
-	for _, secret := range secrets.Items {
-		credentials = append(credentials, secretToCredential(&secret, false))
-	}
-	return credentials
-}
-
-func (r Resource) getK8sCredential(name string) (credential credential) {
-	secret, err := r.K8sClient.CoreV1().Secrets(r.Defaults.Namespace).Get(name, metav1.GetOptions{})
-	if err != nil {
-		return
-	}
-	return secretToCredential(secret, false)
-}
-
-func compareCredentials(resultCred credential, expectCred credential, t *testing.T) {
-	t.Logf("Result cred: %+v\n", resultCred)
-	t.Logf("Expect cred: %+v\n", expectCred)
-	if !reflect.DeepEqual(resultCred, expectCred) {
-		t.Fatal("Credentials not equal")
-	}
-}
-
-func checkResponseError(body *bytes.Buffer, result interface{}, expectError string, t *testing.T) bool {
-	b, err := ioutil.ReadAll(body)
-	if err != nil {
-		t.Fatalf("FAIL: ERROR - reading response body: %s", err.Error())
-		return false
-	}
-	err = json.Unmarshal(b, result)
-	if err != nil {
-		fmt.Printf("checkResponseError jsonUnmarshal got err '%s' expected '%s' got '%s'", err, expectError, string(b))
-		resultError := string(b)
-		if !strings.HasPrefix(resultError, expectError) {
-			t.Fatalf("FAIL: ERROR - Error message == '%s', want '%s', body: %s", resultError, expectError, body)
-		}
-		return false
-	}
-	if expectError != "" {
-		t.Fatalf("FAIL: ERROR - Result == %+v, want error message '%s'", result, expectError)
-	}
-	return true
-}
-
-func checkCredentials(expectCreds []credential, expectError string, r *Resource, t *testing.T) {
-	t.Logf("READ all credentials. Expecting: %+v", expectCreds)
-	// Create dummy REST API request and response
-	httpReq := dummyHTTPRequest("GET", "http://wwww.dummy.com:8383/v1/webhooks/credentials", nil)
-	req := dummyRestfulRequest(httpReq, "")
-	httpWriter := httptest.NewRecorder()
-	resp := dummyRestfulResponse(httpWriter)
-
-	// Test to get all credentials
-	r.getAllCredentials(req, resp)
-
-	// Look for password "********"
-	accessTokens := []string{}
-	for i, cred := range expectCreds {
-		accessToken := cred.AccessToken
-		accessTokens = append(accessTokens, accessToken)
-		expectCreds[i].AccessToken = "********"
-	}
-	// Look for secret token "********"
-	secretTokens := []string{}
-	for i, cred := range expectCreds {
-		secretToken := cred.SecretToken
-		secretTokens = append(secretTokens, secretToken)
-		expectCreds[i].SecretToken = "********"
-	}
-	// Read result
-	resultCreds := []credential{}
-	if !checkResponseError(httpWriter.Body, &resultCreds, expectError, t) {
-		return
-	}
-	testCredentials(resultCreds, expectCreds, t)
-	for i := range expectCreds {
-		expectCreds[i].AccessToken = accessTokens[i]
-	}
-
-	// Verify against K8s client
-	testCredentials(r.getK8sCredentials(), expectCreds, t)
-	t.Logf("Done in READ all credentials. Expecting: %+v", expectCreds)
-}
-
-// Compares two lists of credentials
-func testCredentials(result []credential, expectResult []credential, t *testing.T) {
-	if len(result) != len(expectResult) {
-		t.Fatalf("ERROR: Result == %+v, want %+v, different number of credentials", len(result), len(expectResult))
-	}
-	for i := range expectResult {
-		compareCredentials(result[i], expectResult[i], t)
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			isCred := isCredential(tests[i].secret)
+			if diff := cmp.Diff(tests[i].isCred, isCred); diff != "" {
+				t.Errorf("isCredential() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

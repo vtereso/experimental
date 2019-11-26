@@ -17,38 +17,27 @@ import (
 	"net/http"
 	"os"
 
-	restful "github.com/emicklei/go-restful"
 	endpoints "github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/router"
 )
 
 func main() {
-	// Create/setup resource
 	r, err := endpoints.NewResource()
 	if err != nil {
 		logging.Log.Fatalf("Fatal error creating resource: %s.", err.Error())
 	}
+	logging.Log.Info("Registering all endpoints")
+	h := router.New(r)
 
-	// Set up routes
-	wsContainer := restful.NewContainer()
-	wsContainer.Router(restful.CurlyRouter{})
-
-	// Add web extension
-	r.RegisterWeb(wsContainer)
-	r.RegisterExtensionWebService(wsContainer)
-
-	// Add liveness/readiness
-	r.RegisterLivenessWebService(wsContainer)
-	r.RegisterReadinessWebService(wsContainer)
-
-	// Serve
-	logging.Log.Info("Creating server and entering wait loop.")
 	port := ":8080"
 	portnum := os.Getenv("PORT")
 	if portnum != "" {
 		port = ":" + portnum
 		logging.Log.Infof("Port number from config: %s.", portnum)
 	}
-	server := &http.Server{Addr: port, Handler: wsContainer}
+
+	logging.Log.Info("Creating server and entering wait loop.")
+	server := &http.Server{Addr: port, Handler: h}
 	logging.Log.Fatal(server.ListenAndServe())
 }
