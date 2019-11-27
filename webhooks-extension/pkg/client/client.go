@@ -11,11 +11,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package endpoints
+package client
 
 import (
-	"errors"
 	"os"
+
+	"golang.org/x/xerrors"
 
 	routeclientset "github.com/openshift/client-go/route/clientset/versioned"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
@@ -25,8 +26,17 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// Resource stores all types here that are reused throughout files
-type Resource struct {
+const (
+	// installNamespace is the ENV for the installed namespace
+	installNamespace = "INSTALLED_NAMESPACE"
+	// callbackURL is the ENV for the callback URL
+	callbackURL = "WEBHOOK_CALLBACK_URL"
+	// platform is the ENV for the platform
+	platform = "PLATFORM"
+)
+
+// Group is a group of clients with environment defaults
+type Group struct {
 	TektonClient   tektoncdclientset.Interface
 	K8sClient      k8sclientset.Interface
 	TriggersClient triggersclientset.Interface
@@ -34,8 +44,15 @@ type Resource struct {
 	Defaults       EnvDefaults
 }
 
-// NewResource returns a new Resource instantiated with its clientsets
-func NewResource() (*Resource, error) {
+// EnvDefaults are the environment defaults
+type EnvDefaults struct {
+	Namespace   string `json:"namespace"`
+	CallbackURL string `json:"endpointurl"`
+	Platform    string `json:"platform"`
+}
+
+// NewGroup returns a new Group
+func NewGroup() (*Group, error) {
 	// Get cluster config
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -61,7 +78,8 @@ func NewResource() (*Resource, error) {
 		return nil, err
 	}
 
-	// Currently Openshift does not have a top level client, but instead one for each apiGroup
+	// Currently Openshift does not have a top level client, but instead one for
+	// each apiGroup
 	routesClient, err := routeclientset.NewForConfig(config)
 	if err != nil {
 		logging.Log.Errorf("Error building routes clientset: %s.", err.Error())
@@ -69,28 +87,21 @@ func NewResource() (*Resource, error) {
 	}
 
 	defaults := EnvDefaults{
-		Namespace:   os.Getenv("INSTALLED_NAMESPACE"),
-		CallbackURL: os.Getenv("WEBHOOK_CALLBACK_URL"),
-		Platform:    os.Getenv("PLATFORM"),
+		Namespace:   os.Getenv(installNamespace),
+		CallbackURL: os.Getenv(callbackURL),
+		Platform:    os.Getenv(platform),
 	}
 
 	if defaults.Namespace == "" {
-		return nil, errors.New("INSTALLED_NAMESPACE env value not found")
+		return nil, xerrors.Errorf("%s env value not found", installNamespace)
 	}
 
-	r := &Resource{
+	g := &Group{
 		K8sClient:      k8sClient,
 		TektonClient:   tektonClient,
 		TriggersClient: triggersClient,
 		RoutesClient:   routesClient,
 		Defaults:       defaults,
 	}
-	return r, nil
-}
-
-// EnvDefaults are the environment defaults
-type EnvDefaults struct {
-	Namespace   string `json:"namespace"`
-	CallbackURL string `json:"endpointurl"`
-	Platform    string `json:"platform"`
+	return g, nil
 }

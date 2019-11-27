@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -63,26 +64,27 @@ const (
 	eventListenerSA = "tekton-webhooks-extension-eventlistener"
 )
 
-// webhook contains only the form payload structure used to create a webhook.
-// This is defined within /src/components/WebhookCreate/WebhookCreate.js
-type webhook struct {
-	// Name is the name of the webhook in the UI
-	Name string `json:"name"`
-	// Namespace is the namespace passed to the TriggerTemplate
-	Namespace string `json:"namespace"`
-	// ServiceAccount is the serviceAccount passed to the TriggerTemplate
-	ServiceAccount string `json:"serviceaccount,omitempty"`
-	// AccessTokenRef is the name of the git secret used. This is used for
-	// validation
-	AccessTokenRef string `json:"accesstoken"`
-	// Pipeline is the pipeline that a webhook is being created for. The
-	// pipeline must have corresponding triggers resources.
-	Pipeline string `json:"pipeline"`
-	// DockerRegistry is the registry used to upload images within the pipeline
-	DockerRegistry string `json:"dockerregistry,omitempty"`
-	// GitRepositoryURL is broken down into fields (server, org, and repo) and
-	// passed to the TriggerTemplate. This is also used for validation.
-	GitRepositoryURL string `json:"gitrepositoryurl"`
+// sanitizeGitURL returns a URL for the specified rawurl string, where
+// the .git suffix is removed. The rawurl must have the following format:
+// `http(s)://<git-site>.com/<some-org>/<some-repo>(.git)`
+func sanitizeGitURL(rawurl string) (*url.URL, error) {
+	url, err := url.ParseRequestURI(strings.TrimSuffix(rawurl, ".git"))
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasSuffix(url.Hostname(), ".com") {
+		return nil, xerrors.Errorf("URL hostname '%s' is invalid", url.Hostname())
+	}
+	if url.Scheme != "http" || url.Scheme != "https" {
+		return nil, xerrors.Errorf("URL scheme '%s' is invalid", url.Scheme)
+	}
+	// Does not allow trailing slashes
+	// Expects a path in the format: /<some-org>/<some-repo>
+	s := strings.Split(url.Path, "/")
+	if len(s) != 3 || s[1] == "" || s[2] == "" {
+		return nil, xerrors.Errorf("URL path '%s' is invalid", url.Path)
+	}
+	return url, nil
 }
 
 // createEventListener creates the singleton eventListener for webhooks. This
@@ -567,7 +569,7 @@ func (r Resource) checkTaskRunSucceeds(originalTaskRun *pipelinesv1alpha1.TaskRu
 }
 
 // // Removes from ConfigMap, removes the actual GitHubSource, removes the webhook
-func (r Resource) DeleteWebhook(request *restful.Request, response *restful.Response) {}
+func DeleteWebhook(request *restful.Request, response *restful.Response) {}
 
 // 	modifyingConfigMapLock.Lock()
 // 	defer modifyingConfigMapLock.Unlock()

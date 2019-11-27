@@ -2,11 +2,14 @@ package router
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	restful "github.com/emicklei/go-restful"
 	"github.com/google/go-cmp/cmp"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/testutils"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
+	fakeclient "github.com/tektoncd/experimental/webhooks-extension/pkg/client/fake"
 )
 
 var (
@@ -42,44 +45,60 @@ var (
 			http.MethodGet,
 		},
 	}
+	// expectedWebRoute is the route registered bY registerWeb, which serves
+	// the web bundle
+	expectedWebRoute = map[string][]string{
+		"/web/": []string{
+			http.MethodGet,
+		},
+	}
 )
 
+func init() {
+	// Set the webDirEnvKey env so the stats checks pass
+	// The value can be any file/dir within this directory
+	os.Setenv(webDirEnvKey, "router.go")
+}
+
 func TestRegister(t *testing.T) {
-	handler := New(testutils.DummyResource())
+	handler := New(fakeclient.DummyGroup())
 	container, ok := handler.(*restful.Container)
 	if !ok {
 		t.Fatalf("Underlying handler type was not restful.Container")
 	}
-	expectedRoutes := map[string][]string{}
+	mux := container.ServeMux
 	for _, registeredRoutes := range []map[string][]string{
 		expectedExtensionRoutes,
 		expectedLivenessRoute,
 		expectedReadinessRoute,
+		expectedWebRoute,
 	} {
 		for path, methods := range registeredRoutes {
-			expectedRoutes[path] = methods
+			for _, method := range methods {
+				if _, pattern := mux.Handler(httptest.NewRequest(method, path, nil)); pattern == "" {
+					t.Errorf("Route %s %s not found", method, path)
+				}
+			}
 		}
 	}
-	for _, ws := range container.RegisteredWebServices() {
-		for _, route := range ws.Routes() {
-			checkExpectedRoute(t, expectedExtensionRoutes, route)
-		}
-	}
-
 }
 
-// func Test_registerWeb(t *testing.T) {
-// 	wsContainer := restful.NewContainer()
-// 	registerWeb(wsContainer)
-// }
+func Test_registerWeb(t *testing.T) {
+	wsContainer := restful.NewContainer()
+	registerWeb(wsContainer)
+	mux := wsContainer.ServeMux
+	if _, pattern := mux.Handler(httptest.NewRequest("", "/web/", nil)); pattern == "" {
+		t.Errorf("File server was not located")
+	}
+}
 
 func Test_registerExtensionWebService(t *testing.T) {
 	wsContainer := restful.NewContainer()
-	registerExtensionWebService(wsContainer, testutils.DummyResource())
+	registerExtensionWebService(wsContainer, fakeclient.DummyGroup())
 	webServices := wsContainer.RegisteredWebServices()
 
 	if diff := cmp.Diff(1, len(webServices)); diff != "" {
-		t.Fatalf("registerExtensionWebService() webservice count mismatch (-want +got):\n%s", diff)
+		t.Fatalf("Webservice count mismatch (-want +got):\n%s", diff)
 	}
 	for _, route := range webServices[0].Routes() {
 		checkExpectedRoute(t, expectedExtensionRoutes, route)
@@ -111,6 +130,18 @@ func Test_registerReadinessWebService(t *testing.T) {
 	}
 	for _, route := range webServices[0].Routes() {
 		checkExpectedRoute(t, expectedReadinessRoute, route)
+	}
+}
+
+func Test_routeFunctionWithClientGroup(t *testing.T) {
+	redirect := func(_ *restful.Request, resp *restful.Response, _ *client.Group) {
+		resp.WriteHeader(http.StatusNoContent)
+	}
+	routeFunction := routeFunctionWithClientGroup(fakeclient.DummyGroup(), redirect)
+	response := restful.NewResponse()
+	routeFunction(restful.NewRequest(), response)
+	if diff := cmp.Diff(http.StatusNoContent, response.StatusCode); diff != "" {
+		t.Fatalf("Status code mismatch (-want +got):\n%s", diff)
 	}
 }
 

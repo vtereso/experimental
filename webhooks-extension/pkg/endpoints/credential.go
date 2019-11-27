@@ -19,7 +19,9 @@ import (
 	"time"
 
 	restful "github.com/emicklei/go-restful"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/models"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/utils"
 	"golang.org/x/xerrors"
 	corev1 "k8s.io/api/core/v1"
@@ -33,59 +35,41 @@ const (
 	// accessToken is a key within a K8s secret Data field. This value of this
 	// key should be a git access token
 	accessToken = "accessToken"
-	// secretToken is a key within a K8s secret Data field. This value of this
+	// SecretToken is a key within a K8s secret Data field. This value of this
 	// key should be used to validate payloads (e.g. webhooks).
-	secretToken   = "secretToken"
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-	letterBytes   = "123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	secretToken = "secretToken"
 )
-
-// credentialRequest is the intended structure of an http request for creating a
-// credential, which is a K8s secret of type access token
-type credentialRequest struct {
-	Name        string `json:"name"`
-	AccessToken string `json:"accesstoken"`
-}
-
-// credentialRequest is the intended structure of an http response when getting
-// a credential, which is a K8s secret of type access token
-type credentialResponse struct {
-	credentialRequest `json:",inline"`
-	SecretToken       string `json:"secrettoken,omitempty"`
-}
 
 // CreateCredential creates a secret of type access token, which should store
 // a Git access token. The created secret also generates a secret string, which
 // should be used to verify against payloads (e.g. webhooks).
-func (r Resource) CreateCredential(request *restful.Request, response *restful.Response) {
+func CreateCredential(request *restful.Request, response *restful.Response, cg *client.Group) {
 	logging.Log.Debug("In CreateCredential")
-	cred := credentialRequest{}
+	credReq := models.CredentialRequest{}
 
-	if err := request.ReadEntity(&cred); err != nil {
+	if err := request.ReadEntity(&credReq); err != nil {
 		err = xerrors.Errorf("Error parsing request body: %s", err)
 		utils.RespondError(response, err, http.StatusBadRequest)
 		return
 	}
 
-	if err := checkCredentialRequest(cred); err != nil {
-		err = xerrors.Errorf("Invalid credential value: %s", err)
+	if err := credReq.Validate(); err != nil {
+		err = xerrors.Errorf("Invalid credential request value: %s", err)
 		utils.RespondError(response, err, http.StatusBadRequest)
 		return
 	}
-	secret := credentialRequestToSecret(cred, r.Defaults.Namespace)
-	logging.Log.Debugf("Creating credential %s in namespace %s", cred.Name, r.Defaults.Namespace)
+	secret := credentialRequestToSecret(credReq, cg.Defaults.Namespace)
+	logging.Log.Debugf("Creating credential %s in namespace %s", credReq.Name, cg.Defaults.Namespace)
 
-	if _, err := r.K8sClient.CoreV1().Secrets(r.Defaults.Namespace).Create(secret); err != nil {
+	if _, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Create(secret); err != nil {
 		utils.RespondError(response, err, http.StatusBadRequest)
 		return
 	}
-	utils.WriteResponseLocation(request, response, cred.Name)
+	utils.WriteResponseLocation(request.Request, response, credReq.Name)
 }
 
 // DeleteCredential deletes the specified credential
-func (r Resource) DeleteCredential(request *restful.Request, response *restful.Response) {
+func DeleteCredential(request *restful.Request, response *restful.Response, cg *client.Group) {
 	logging.Log.Debug("In DeleteCredential")
 	credName := request.PathParameter("name")
 	if credName == "" {
@@ -95,7 +79,7 @@ func (r Resource) DeleteCredential(request *restful.Request, response *restful.R
 	}
 	logging.Log.Debugf("Deleting secret: %s", credName)
 	// Assumes whatever secret name specified would be a valid credential
-	err := r.K8sClient.CoreV1().Secrets(r.Defaults.Namespace).Delete(credName, &metav1.DeleteOptions{})
+	err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Delete(credName, &metav1.DeleteOptions{})
 	if err != nil {
 		var errorCode int
 		switch {
@@ -112,16 +96,16 @@ func (r Resource) DeleteCredential(request *restful.Request, response *restful.R
 
 // GetAllCredentials returns all the credentials specified within the default
 // namespace
-func (r Resource) GetAllCredentials(request *restful.Request, response *restful.Response) {
+func GetAllCredentials(request *restful.Request, response *restful.Response, cg *client.Group) {
 	// Get secrets from the resource K8sClient
-	secrets, err := r.K8sClient.CoreV1().Secrets(r.Defaults.Namespace).List(metav1.ListOptions{})
+	secrets, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).List(metav1.ListOptions{})
 	if err != nil {
 		utils.RespondError(response, err, http.StatusInternalServerError)
 		return
 	}
 
 	// Parse K8s secrets to credentials
-	creds := []credentialResponse{}
+	creds := []models.CredentialResponse{}
 	for _, secret := range secrets.Items {
 		if isCredential(secret) {
 			// Return only the names
@@ -136,7 +120,7 @@ func (r Resource) GetAllCredentials(request *restful.Request, response *restful.
 }
 
 // credentialToSecret converts a credentialRequest into a K8s secret
-func credentialRequestToSecret(cred credentialRequest, namespace string) *corev1.Secret {
+func credentialRequestToSecret(cred models.CredentialRequest, namespace string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cred.Name,
@@ -145,40 +129,20 @@ func credentialRequestToSecret(cred credentialRequest, namespace string) *corev1
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			accessToken: []byte(cred.AccessToken),
-			secretToken: getRandomToken(),
+			secretToken: utils.GetRandomToken(src),
 		},
 	}
 }
 
 // secretToCredential converts a K8s secret into a credentialResponse
-func secretToCredentialResponse(s corev1.Secret) credentialResponse {
-	return credentialResponse{
-		credentialRequest: credentialRequest{
+func secretToCredentialResponse(s corev1.Secret) models.CredentialResponse {
+	return models.CredentialResponse{
+		CredentialRequest: models.CredentialRequest{
 			Name:        s.Name,
 			AccessToken: string(s.Data[accessToken]),
 		},
 		SecretToken: string(s.Data[secretToken]),
 	}
-}
-
-// getRandomToken generates a random 20-character secret.
-// Source: https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-go
-func getRandomToken() []byte {
-	n := 20
-	b := make([]byte, n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
-	}
-	return b
 }
 
 // isCredential returns whether the specified secret is a credential. This is a

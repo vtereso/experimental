@@ -15,14 +15,42 @@ package utils
 
 import (
 	"fmt"
+	"math/rand"
 	"net/http"
 
-	restful "github.com/emicklei/go-restful"
-	logging "github.com/tektoncd/dashboard/pkg/logging"
+	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
 )
 
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+	letterBytes   = "123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
+// GetRandomToken generates a random 20-character secret using a random source
+// Source: https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-go
+func GetRandomToken(src rand.Source) []byte {
+	n := 20
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+	return b
+}
+
 // RespondError logs the error, sets the status status code and writes the error
-// string as plain text to the response
+// string as plain text to the response. The caller should return
+// immediately after
 func RespondError(response http.ResponseWriter, err error, statusCode int) {
 	logging.Log.Error(err)
 	response.WriteHeader(statusCode)
@@ -31,12 +59,13 @@ func RespondError(response http.ResponseWriter, err error, statusCode int) {
 }
 
 // WriteResponseLocation sets the http response "Content-Location" header and
-// sets the status code to 201 for POST requests
-func WriteResponseLocation(request *restful.Request, response *restful.Response, identifier string) {
-	if request.Request.Method != http.MethodPost {
+// sets the status code to 201 for POST requests. The caller should return
+// immediately after
+func WriteResponseLocation(request *http.Request, response http.ResponseWriter, identifier string) {
+	if request.Method != http.MethodPost {
 		return
 	}
-	location := fmt.Sprintf("%s/%s", request.Request.URL.Path, identifier)
-	response.AddHeader("Content-Location", location)
+	location := fmt.Sprintf("%s/%s", request.URL.Path, identifier)
+	response.Header().Add("Content-Location", location)
 	response.WriteHeader(http.StatusCreated)
 }

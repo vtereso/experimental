@@ -16,50 +16,22 @@ package testutils
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 
-	fakerouteclientset "github.com/openshift/client-go/route/clientset/versioned/fake"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
-	faketektonclientset "github.com/tektoncd/pipeline/pkg/client/clientset/versioned/fake"
-	faketriggerclientset "github.com/tektoncd/triggers/pkg/client/clientset/versioned/fake"
-	fakek8sclientset "k8s.io/client-go/kubernetes/fake"
+	fakeclient "github.com/tektoncd/experimental/webhooks-extension/pkg/client/fake"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/router"
 )
 
-// DummyResource returns a resource using fake clients
-func DummyResource() endpoints.Resource {
-	return endpoints.Resource{
-		K8sClient:      dummyK8sClientset(),
-		TektonClient:   dummyTektonClientset(),
-		TriggersClient: dummyTriggersClientset(),
-		RoutesClient:   dummyRoutesClientset(),
-		Defaults:       dummyDefaults(),
-	}
-}
-
-func dummyK8sClientset() *fakek8sclientset.Clientset {
-	return fakek8sclientset.NewSimpleClientset()
-}
-
-func dummyTektonClientset() *faketektonclientset.Clientset {
-	return faketektonclientset.NewSimpleClientset()
-}
-
-func dummyTriggersClientset() *faketriggerclientset.Clientset {
-	return faketriggerclientset.NewSimpleClientset()
-}
-
-func dummyRoutesClientset() *fakerouteclientset.Clientset {
-	return fakerouteclientset.NewSimpleClientset()
-}
-
-func dummyHTTPRequest(method string, url string, body io.Reader) *http.Request {
-	httpReq, _ := http.NewRequest(method, url, body)
+// DummyHTTPRequest reurns a new http with the specified method, url and body.
+// The content type is also set to JSON
+func DummyHTTPRequest(method string, url string, body io.Reader) *http.Request {
+	httpReq := httptest.NewRequest(method, url, body)
 	httpReq.Header.Set("Content-Type", "application/json")
 	return httpReq
 }
 
-func dummyDefaults() endpoints.EnvDefaults {
-	return endpoints.EnvDefaults{
-		Namespace: "default",
-		Platform:  "openshift",
-	}
+// DummyServer return a new httptest server and the client group used within
+func DummyServer() **httptest.Server, *client.Group) {
+	cg := fakeclient.DummyGroup()
+	return httptest.NewServer(router.New(cg)), cg
 }
