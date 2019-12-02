@@ -40,6 +40,20 @@ func TestWebhookValidate(t *testing.T) {
 			hasErr: true,
 		},
 		{
+			name: "Webhook Name Too Long",
+			w: Webhook{
+				// 58 Characters
+				Name:             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Namespace:        "namespace",
+				ServiceAccount:   "serviceAccount",
+				AccessTokenRef:   "tokenRef",
+				Pipeline:         "pipeline",
+				DockerRegistry:   "dockerRegistry",
+				GitRepositoryURL: "gitURL",
+			},
+			hasErr: true,
+		},
+		{
 			name: "Webhook No Namespace",
 			w: Webhook{
 				Name:             "webhook",
@@ -116,6 +130,48 @@ func TestWebhookValidate(t *testing.T) {
 		t.Run(tests[i].name, func(t *testing.T) {
 			var hasErr bool
 			if err := tests[i].w.Validate(); err != nil {
+				hasErr = true
+			}
+			if diff := cmp.Diff(tests[i].hasErr, hasErr); diff != "" {
+				t.Errorf("Validate error mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestValidateWebhookName(t *testing.T) {
+	tests := []struct {
+		name        string
+		webhookName string
+		hasErr      bool
+	}{
+		// Correct
+		{
+			name:        "Valid Webhook Name",
+			webhookName: "webhook",
+			hasErr:      false,
+		},
+		// Incorrect
+		{
+			name:        "Empty Webhook Name",
+			webhookName: "",
+			hasErr:      true,
+		},
+		{
+			name:        "Too Long Webhook Name",
+			webhookName: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			hasErr:      true,
+		},
+		{
+			name:        "Webhook Name With Hyphens",
+			webhookName: "a-webhook",
+			hasErr:      true,
+		},
+	}
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			var hasErr bool
+			if err := ValidateWebhookName(tests[i].webhookName); err != nil {
 				hasErr = true
 			}
 			if diff := cmp.Diff(tests[i].hasErr, hasErr); diff != "" {

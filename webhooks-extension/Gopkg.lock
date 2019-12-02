@@ -78,11 +78,10 @@
   version = "v1.0.0"
 
 [[projects]]
-  digest = "1:010d46ea3c1e730897e53058d1013a963f3f987675dda87df64f891b945281db"
+  digest = "1:bf40199583e5143d1472fc34d10d6f4b69d97572142acf343b3e43136da40823"
   name = "github.com/google/go-cmp"
   packages = [
     "cmp",
-    "cmp/cmpopts",
     "cmp/internal/diff",
     "cmp/internal/flags",
     "cmp/internal/function",
@@ -226,14 +225,6 @@
   pruneopts = "UT"
   revision = "ba968bfe8b2f7e042a574c888954fccecfa385b4"
   version = "v0.8.1"
-
-[[projects]]
-  digest = "1:4214ab2523b5dc2d4d36b152982b1d65c6b3e6e00d2c0fa8336e6204a793065d"
-  name = "github.com/tektoncd/dashboard"
-  packages = ["pkg/logging"]
-  pruneopts = "UT"
-  revision = "46ba3f8e2774bc13d757e11727ee3e47d145ec96"
-  version = "v0.2.0"
 
 [[projects]]
   digest = "1:3023718e79c04239565bdf2bc45bbc28b6b9616893f1f32eedd45f2c2d1cd0a0"
@@ -550,7 +541,7 @@
   version = "kubernetes-1.12.9"
 
 [[projects]]
-  digest = "1:b6ba3dc64add5ba37fdfe21157d24794a87d40acc3e24cda8b380558a216ae7a"
+  digest = "1:68cd0de3f7637abe87f655577d25f86347ae57d3eb957e4f3a52a3217168e444"
   name = "k8s.io/client-go"
   packages = [
     "discovery",
@@ -698,6 +689,7 @@
     "pkg/version",
     "plugin/pkg/client/auth/exec",
     "rest",
+    "rest/fake",
     "rest/watch",
     "testing",
     "tools/cache",
@@ -747,11 +739,9 @@
   input-imports = [
     "github.com/emicklei/go-restful",
     "github.com/google/go-cmp/cmp",
-    "github.com/google/go-cmp/cmp/cmpopts",
     "github.com/google/go-github/github",
     "github.com/openshift/client-go/route/clientset/versioned",
     "github.com/openshift/client-go/route/clientset/versioned/fake",
-    "github.com/tektoncd/dashboard/pkg/logging",
     "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1",
     "github.com/tektoncd/pipeline/pkg/client/clientset/versioned",
     "github.com/tektoncd/pipeline/pkg/client/clientset/versioned/fake",
@@ -768,6 +758,7 @@
     "k8s.io/client-go/kubernetes",
     "k8s.io/client-go/kubernetes/fake",
     "k8s.io/client-go/rest",
+    "k8s.io/client-go/rest/fake",
   ]
   solver-name = "gps-cdcl"
   solver-version = 1

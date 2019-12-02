@@ -37,18 +37,27 @@ const (
 
 // Group is a group of clients with environment defaults
 type Group struct {
-	TektonClient   tektoncdclientset.Interface
-	K8sClient      k8sclientset.Interface
+	// TektonClient is the client set for Tekton pipelines
+	TektonClient tektoncdclientset.Interface
+	// K8sClient is the client set for Kubernetes
+	K8sClient k8sclientset.Interface
+	// TriggersClient is the client set for Tekton triggers
 	TriggersClient triggersclientset.Interface
-	RoutesClient   routeclientset.Interface
-	Defaults       EnvDefaults
+	// RoutesClient si the client for Openshift routes
+	RoutesClient routeclientset.Interface
+	// Defaults is a group of environment variable defaults
+	Defaults EnvDefaults
 }
 
 // EnvDefaults are the environment defaults
 type EnvDefaults struct {
-	Namespace   string `json:"namespace"`
+	// Namespace is the install namespace of the Dashboard extension
+	Namespace string `json:"namespace"`
+	// CallbackURL is the URL that webhooks will send event to
 	CallbackURL string `json:"endpointurl"`
-	Platform    string `json:"platform"`
+	// Platform is the platofrom the Dashboard extension is deployed on. On
+	// Openshift, routes are created for webhooks
+	Platform string `json:"platform"`
 }
 
 // NewGroup returns a new Group

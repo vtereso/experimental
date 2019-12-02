@@ -17,16 +17,11 @@ import (
 	"net/http"
 	"os"
 
-	endpoints "github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/router"
 )
 
 func main() {
-	r, err := endpoints.NewResource()
-	if err != nil {
-		logging.Log.Fatalf("Fatal error creating resource: %s.", err.Error())
-	}
 	logging.Log.Info("Registering all endpoints")
 	h := router.New(r)
 
@@ -34,7 +29,7 @@ func main() {
 	portnum := os.Getenv("PORT")
 	if portnum != "" {
 		port = ":" + portnum
-		logging.Log.Infof("Port number from config: %s.", portnum)
+		logging.Log.Infof("Port number from config: %s", portnum)
 	}
 
 	logging.Log.Info("Creating server and entering wait loop.")

@@ -15,11 +15,10 @@ package endpoints
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,20 +26,26 @@ import (
 	"golang.org/x/xerrors"
 
 	restful "github.com/emicklei/go-restful"
+	routesv1 "github.com/openshift/api/route/v1"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/models"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/utils"
+	githook "github.com/tektoncd/experimental/webhooks-extension/pkg/webhook"
 	pipelinesv1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
-	v1alpha1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
+	triggersv1alpha1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 var (
-	// modifyingConfigMapLock is the lock that must be acquired when making any
-	// changes to the ConfigMap
-	modifyingConfigMapLock sync.Mutex
+	// eventListenerLock is the lock that must be acquired within functions that
+	// modify the EventListener
+	eventListenerLock sync.Mutex
 	// pullRequestActions is a pipeline parameter with the set of actions to run
 	// against for pull requests
 	pullRequestActions = pipelinesv1alpha1.Param{
@@ -53,16 +58,643 @@ var (
 )
 
 const (
-	// configMapName is the name of the ConfigMap that stores information for
-	// GitHub webhooks
-	configMapName = "githubwebhook"
+	// monitorTaskName is the name of the monitor task that will be used in an
+	// EventListenerTrigger to monitor PipelineRuns created by the same event
+	monitorTaskName = "monitor-task"
 	// eventListenrName is the name of the EventListener that is the singleton
 	// source of truth for Triggers/events
 	eventListenerName = "tekton-webhooks-eventlistener"
 	// eventListenerSA is the name of the serviceAccount that should the
 	// EventListener (eventListenerName) should be configured with
 	eventListenerSA = "tekton-webhooks-extension-eventlistener"
+	// triggerTemplatePostfix is the additional name postfix for a
+	// TriggerTemplate. The webhook pipeline name is used for the base
+	triggerTemplatePostfix = "template"
+	// pushTriggerBindingPostfix is the additional name postfix for a
+	// TriggerBinding. The webhook pipeline name is used for the base
+	pushTriggerBindingPostfix = "push-binding"
+	// pullTriggerBindingPostfix is the additional name postfix for a
+	// TriggerBinding. The webhook pipeline name is used for the base
+	pullTriggerBindingPostfix = "pullrequest-binding"
+	// monitorTriggerBindingPostfix is the additional name postfix for a
+	// TriggerBinding. The webhook pipeline name is used for the base
+	monitorTriggerBindingPostfix = "binding"
+	// wextTargetNamespace is the name of the EventListenerTrigger parameter for
+	// the namespace used within a TriggerTemplate
+	wextTargetNamespace = "Wext-Target-Namespace"
+	// hookServiceAccount is the name of the EventListenerTrigger parameter for
+	// the service account used within a TriggerTemplate
+	wextServiceAccount = "Wext-Service-Account"
+	// hookDockerRegistry is the name of the EventListenerTrigger parameter for
+	// the docker registry used within a TriggerTemplate
+	wextDockerRegistry = "Wext-Docker-Registry"
+	// hookGitServer is the name of the EventListenerTrigger parameter for
+	// the git server used within a TriggerTemplate
+	wextGitServer = "Wext-Git-server"
+	// hookGitOrg is the name of the EventListenerTrigger parameter for
+	// the git organization used within a TriggerTemplate
+	wextGitOrg = "Wext-Git-Org"
+	// hookGitRepo is the name of the EventListenerTrigger parameter for
+	// the git repo used within a TriggerTemplate
+	wextGitRepo = "Wext-Git-Repo"
+	// WextInterceptorTriggerName is the name of the EventListenerTrigger
+	// Interceptor parameter used by the Webhook extension interceptor
+	WextInterceptorTriggerName = "Wext-Trigger-Name"
+	// WextInterceptorRepoURL is the name of the EventListenerTrigger
+	// Interceptor parameter used by the Webhook extension interceptor
+	WextInterceptorRepoURL = "Wext-Repository-Url"
+	// WextInterceptorEvent is the name of the EventListenerTrigger Interceptor
+	// parameter used by the Webhook extension interceptor
+	WextInterceptorEvent = "Wext-Incoming-Event"
+	// WextInterceptorSecretName is the name of the EventListenerTrigger
+	// Interceptor parameter used by the Webhook extension interceptor
+	WextInterceptorSecretName = "Wext-Secret-Name"
+	// pipelineRunServerName is the label key applied to PipelineRuns for
+	// the git server
+	pipelineRunServerName = "webhooks.tekton.dev/gitServer"
+	// pipelineRunOrgName is the label key applied to PipelineRuns for
+	// the git server
+	pipelineRunOrgName = "webhooks.tekton.dev/gitOrg"
+	// pipelineRunRepoName is the label key applied to PipelineRuns for
+	// the git server
+	pipelineRunRepoName = "webhooks.tekton.dev/gitRepo"
 )
+
+// CreateWebhook creates a webhook for a given repository and creates/updates
+// the EventListener
+func CreateWebhook(request *restful.Request, response *restful.Response, cg *client.Group) {
+	logging.Log.Debug("CreateWebhook()")
+	eventListenerLock.Lock()
+	defer eventListenerLock.Unlock()
+
+	logging.Log.Infof("Webhook creation request received with request: %+v.", request)
+	// Read and validate webhook payload
+	webhook := models.Webhook{}
+	if err := request.ReadEntity(&webhook); err != nil {
+		err = xerrors.Errorf("Error trying to read request entity as webhook %s", err)
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+	if err := webhook.Validate(); err != nil {
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+	// Validate Git URL
+	gitURL, err := sanitizeGitURL(webhook.GitRepositoryURL)
+	if err != nil {
+		err = xerrors.Errorf("Invalid value webhook URL: %s", err)
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+
+	// Check for Triggers resources
+	_, templateErr := cg.TriggersClient.TektonV1alpha1().TriggerTemplates(cg.Defaults.Namespace).Get(fmt.Sprintf("%s-%s", webhook.Pipeline, triggerTemplatePostfix), metav1.GetOptions{})
+	_, pushErr := cg.TriggersClient.TektonV1alpha1().TriggerBindings(cg.Defaults.Namespace).Get(fmt.Sprintf("%s-%s", webhook.Pipeline, pushTriggerBindingPostfix), metav1.GetOptions{})
+	_, pullrequestErr := cg.TriggersClient.TektonV1alpha1().TriggerBindings(cg.Defaults.Namespace).Get(fmt.Sprintf("%s-%s", webhook.Pipeline, pullTriggerBindingPostfix), metav1.GetOptions{})
+	if templateErr != nil || pushErr != nil || pullrequestErr != nil {
+		err := xerrors.Errorf("Expected Trigger resources for '%s' pipeline not found", webhook.Pipeline)
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+
+	// Get or initialize EventListener
+	el, err := getWebhookEventListener(cg)
+	// Errors other than IsNotFound
+	if err != nil && !k8serrors.IsNotFound(err) {
+		utils.RespondError(response, err, http.StatusInternalServerError)
+		return
+	}
+	eventListenerExists := (err == nil)
+	existingRepoWebhook := false
+	if eventListenerExists {
+		existingHooks := getWebhooksFromEventListener(*el)
+		// Check if webhook exists already
+		for _, existingHook := range existingHooks {
+			if webhook.Name == existingHook.Name {
+				err := xerrors.Errorf("Webhook already exists with name %s", webhook.Name)
+				utils.RespondError(response, err, http.StatusBadRequest)
+				return
+			}
+			if webhook.GitRepositoryURL == existingHook.GitRepositoryURL {
+				existingRepoWebhook = true
+				if webhook.Pipeline == existingHook.Pipeline {
+					err := xerrors.Errorf("Webhook on URL %s already exists with Pipeline %s", webhook.GitRepositoryURL, webhook.Pipeline)
+					utils.RespondError(response, err, http.StatusBadRequest)
+					return
+				}
+			}
+		}
+	} else {
+		el = getBaseEventListener(cg.Defaults.Namespace)
+	}
+
+	// Attempt to create webhook if not found
+	if !existingRepoWebhook {
+		accessToken, secretToken, err := getWebhookSecretTokens(cg, webhook.AccessTokenRef)
+		if err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+		err = githook.DoGitHubWebhookRequest(gitURL, cg.Defaults.CallbackURL, accessToken, secretToken, githook.Subscribe, []string{"push", "pull_request"})
+		if err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+		logging.Log.Debug("Webhook creation succeeded")
+	}
+
+	// Add new EventListenerTriggers for webhook request
+	addWebhookTriggers(cg, el, webhook)
+
+	// Update or create EventListener
+	if eventListenerExists {
+		if err := updateEventListener(cg, el); err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if err := createEventListener(cg, el); err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+		// Await EventListenerStatus to be populated
+		el, err = waitForEventListenerStatus(cg)
+		if err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+		// Create Route or Ingress
+		if strings.Contains(strings.ToLower(cg.Defaults.Platform), "openshift") {
+			if err := createOpenshiftRoute(cg, el.Status.Configuration.GeneratedResourceName); err != nil {
+				logging.Log.Debug("Failed to create Route, deleting EventListener...")
+				if err = deleteEventListener(cg, eventListenerName); err != nil {
+					logging.Log.Debug("Failed to delete EventListener")
+				}
+				utils.RespondError(response, xerrors.New("Failed to create Route for webhook"), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			if err := createIngress(cg, el.Status.Configuration.GeneratedResourceName); err != nil {
+				logging.Log.Debug("Failed to create Ingress, deleting EventListener...")
+				if err = deleteEventListener(cg, eventListenerName); err != nil {
+					logging.Log.Debug("Failed to delete EventListener")
+				}
+				utils.RespondError(response, xerrors.New("Failed to create Ingress for webhook"), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+	response.WriteHeader(http.StatusCreated)
+}
+
+// DeleteWebhook attempts to remove a webhook and the corresponding triggers on
+// the EventListener
+func DeleteWebhook(request *restful.Request, response *restful.Response, cg *client.Group) {
+	logging.Log.Debug("DeleteWebhook()")
+	eventListenerLock.Lock()
+	defer eventListenerLock.Unlock()
+
+	// Necessary path parameter
+	name := request.PathParameter("name")
+	if err := models.ValidateWebhookName(name); err != nil {
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+	// Expected query parameters
+	repo := request.QueryParameter("repository")
+	if repo == "" {
+		err := xerrors.New("Repository query parameter must be provided and non-empty")
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+	// Validate Git URL
+	gitURL, err := sanitizeGitURL(repo)
+	if err != nil {
+		err = xerrors.Errorf("Invalid value webhook URL: %s", err)
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	}
+	// Optional query parameter
+	var deleteWebhookPipelineRuns bool
+	deletePipelineRunsQueryParam := request.QueryParameter("deletepipelineruns")
+	if deletePipelineRunsQueryParam != "" {
+		deleteWebhookPipelineRuns, err = strconv.ParseBool(deletePipelineRunsQueryParam)
+		if err != nil {
+			err := xerrors.New("Bad request: 'deletepipelineruns' query params should be set to 'true', 'false', or not be provided")
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+	}
+	logging.Log.Debugf("DeleteWebhook() name: %s, repo: %s, deleteRuns: %b", name, repo, deleteWebhookPipelineRuns)
+
+	// Get webhooks
+	el, err := getWebhookEventListener(cg)
+	if err != nil {
+		utils.RespondError(response, err, http.StatusInternalServerError)
+		return
+	}
+	webhooks := getWebhooksFromEventListener(*el)
+	// List of webhooks on repository
+	webhooks = filterWebhooksByRepo(webhooks, repo)
+	deleteWebhook, err := findWebhookByName(webhooks, name)
+	if err != nil {
+		utils.RespondError(response, err, http.StatusInternalServerError)
+		return
+	}
+
+	switch len(webhooks) {
+	case 0:
+		err = xerrors.Errorf("No webhooks found for repo: %s", repo)
+		utils.RespondError(response, err, http.StatusBadRequest)
+		return
+	case 1:
+		accessToken, secretToken, err := getWebhookSecretTokens(cg, deleteWebhook.AccessTokenRef)
+		if err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+		// Attempt to remove webhook
+		err = githook.DoGitHubWebhookRequest(gitURL, cg.Defaults.CallbackURL, accessToken, secretToken, githook.Unsubscribe, []string{"push", "pull_request"})
+		if err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Update the EventListenerTriggers
+	removeWebhookTriggers(cg, el, name)
+	switch len(el.Spec.Triggers) {
+	// The EventListener cannot have no Triggers or it will fail validation
+	case 0:
+		if err := deleteEventListener(cg, el.Name); err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+	default:
+		if err := updateEventListener(cg, el); err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Remove PipelineRuns
+	if deleteWebhookPipelineRuns {
+		if err := deletePipelineRuns(cg, gitURL, deleteWebhook.Namespace, deleteWebhook.Pipeline); err != nil {
+			utils.RespondError(response, err, http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+// GetAllWebhooks returns all of the webhooks triggers on the EventListener
+func GetAllWebhooks(request *restful.Request, response *restful.Response, cg *client.Group) {
+	logging.Log.Debugf("GetAllWebhooks()")
+	el, err := getWebhookEventListener(cg)
+	if err != nil {
+		utils.RespondError(response, err, http.StatusInternalServerError)
+		return
+	}
+	webhooks := getWebhooksFromEventListener(*el)
+	response.WriteEntity(webhooks)
+}
+
+// deletePipelineRuns deletes PipelineRuns witin the specified namespace that
+// have a matching PipelineRef and GitURL
+func deletePipelineRuns(cg *client.Group, repoURL *url.URL, namespace, pipeline string) error {
+	logging.Log.Debugf("deletePipelineRuns() repo: %s, namespace: %s, pipeline: %b", repoURL.String(), namespace, pipeline)
+	labelSelector := fields.SelectorFromSet(makePipelineRunSelectorSet(repoURL)).String()
+	pipelineRunList, err := cg.TektonClient.TektonV1alpha1().PipelineRuns(namespace).List(metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return err
+	}
+	for _, pipelineRun := range pipelineRunList.Items {
+		err := cg.TektonClient.TektonV1alpha1().PipelineRuns(namespace).Delete(pipelineRun.Name, &metav1.DeleteOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// makePipelineRunSelectorSet creates a label selector set
+func makePipelineRunSelectorSet(repoURL *url.URL) map[string]string {
+	server, org, repo := getGitValues(*repoURL)
+	return map[string]string{
+		pipelineRunServerName: server,
+		pipelineRunOrgName:    org,
+		pipelineRunRepoName:   repo,
+	}
+}
+
+// createOpenshiftRoute attempts to create an Openshift Route on the service.
+// The Route has the same name as the service
+func createOpenshiftRoute(cg *client.Group, serviceName string) error {
+	route := &routesv1.Route{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: serviceName,
+		},
+		Spec: routesv1.RouteSpec{
+			To: routesv1.RouteTargetReference{
+				Kind: "Service",
+				Name: serviceName,
+			},
+		},
+	}
+	_, err := cg.RoutesClient.RouteV1().Routes(cg.Defaults.Namespace).Create(route)
+	return err
+}
+
+// deleteOpenshiftRoute attempts to delete an Openshift Route
+func deleteOpenshiftRoute(cg *client.Group, routeName string) error {
+	return cg.RoutesClient.RouteV1().Routes(cg.Defaults.Namespace).Delete(routeName, &metav1.DeleteOptions{})
+}
+
+// createIngress attempts to creates an ingress for the service. The Ingress has
+// the same name as the service
+func createIngress(cg *client.Group, serviceName string) error {
+	// Unlike webhook creation, the ingress does not need a protocol specified
+	callback := strings.TrimPrefix(cg.Defaults.CallbackURL, "http://")
+	callback = strings.TrimPrefix(callback, "https://")
+
+	ingress := &v1beta1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: cg.Defaults.Namespace,
+		},
+		Spec: v1beta1.IngressSpec{
+			Rules: []v1beta1.IngressRule{
+				{
+					Host: callback,
+					IngressRuleValue: v1beta1.IngressRuleValue{
+						HTTP: &v1beta1.HTTPIngressRuleValue{
+							Paths: []v1beta1.HTTPIngressPath{
+								{
+									Backend: v1beta1.IngressBackend{
+										ServiceName: serviceName,
+										ServicePort: intstr.IntOrString{
+											Type:   intstr.Int,
+											IntVal: 8080,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := cg.K8sClient.ExtensionsV1beta1().Ingresses(cg.Defaults.Namespace).Create(ingress)
+	return err
+}
+
+// deleteIngress attempts to deletes the ingress
+func deleteIngress(cg *client.Group, ingressName string) error {
+	return cg.K8sClient.ExtensionsV1beta1().Ingresses(cg.Defaults.Namespace).Delete(ingressName, &metav1.DeleteOptions{})
+}
+
+// addWebhookTriggers updates the EventListener with additional triggers
+// generated by the webhook. The created EventListenerTriggers have names in the
+// form: `<webhookName>-<postfix>`. This change is only made in memory and needs
+// to be persisted
+func addWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhook models.Webhook) {
+	pipelineTriggerParams := getPipelineTriggerParams(webhook)
+	monitorTriggerParams := getMonitorTriggerParams(cg, webhook)
+
+	newPushTrigger := newTrigger(fmt.Sprintf("%s-%s", webhook.Name, pushTriggerBindingPostfix),
+		fmt.Sprintf("%s-%s", webhook.Pipeline, pushTriggerBindingPostfix),
+		fmt.Sprintf("%s-%s", webhook.Pipeline, triggerTemplatePostfix),
+		cg.Defaults.Namespace,
+		webhook.GitRepositoryURL,
+		"push",
+		webhook.AccessTokenRef,
+		pipelineTriggerParams)
+
+	newPullRequestTrigger := newTrigger(fmt.Sprintf("%s-%s", webhook.Name, pullTriggerBindingPostfix),
+		fmt.Sprintf("%s-%s", webhook.Pipeline, pullTriggerBindingPostfix),
+		fmt.Sprintf("%s-%s", webhook.Pipeline, triggerTemplatePostfix),
+		cg.Defaults.Namespace,
+		webhook.GitRepositoryURL,
+		"pull_request",
+		webhook.AccessTokenRef,
+		pipelineTriggerParams)
+
+	monitorTrigger := newTrigger(fmt.Sprintf("%s-%s", webhook.Name, monitorTaskName),
+		fmt.Sprintf("%s-%s", webhook.Pipeline, monitorTriggerBindingPostfix),
+		fmt.Sprintf("%s-%s", webhook.Pipeline, triggerTemplatePostfix),
+		cg.Defaults.Namespace,
+		webhook.GitRepositoryURL,
+		"pull_request",
+		webhook.AccessTokenRef,
+		monitorTriggerParams)
+
+	newTriggers := []triggersv1alpha1.EventListenerTrigger{
+		newPushTrigger,
+		newPullRequestTrigger,
+		monitorTrigger,
+	}
+	eventListener.Spec.Triggers = append(eventListener.Spec.Triggers, newTriggers...)
+}
+
+// removeWebhookTriggers removes the Triggers from the EventListener that match
+// the webhook name. This change is only made in memory and needs to be
+// persisted
+func removeWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhookName string) {
+	newTriggers := []triggersv1alpha1.EventListenerTrigger{}
+	for _, trigger := range eventListener.Spec.Triggers {
+		if getWebhookNameFromTrigger(trigger) != webhookName {
+			newTriggers = append(newTriggers, trigger)
+		}
+	}
+	eventListener.Spec.Triggers = newTriggers
+}
+
+// newTrigger creates a new Trigger
+func newTrigger(triggerName, bindingName, templateName, interceptorNamespace, repoURL, eventType, secretName string, params []pipelinesv1alpha1.Param) triggersv1alpha1.EventListenerTrigger {
+	return triggersv1alpha1.EventListenerTrigger{
+		Name: triggerName,
+		Binding: triggersv1alpha1.EventListenerBinding{
+			Name:       bindingName,
+			APIVersion: "v1alpha1",
+		},
+		Params: params,
+		Template: triggersv1alpha1.EventListenerTemplate{
+			Name:       templateName,
+			APIVersion: "v1alpha1",
+		},
+		Interceptor: &triggersv1alpha1.EventInterceptor{
+			Header: []pipelinesv1alpha1.Param{
+				{Name: WextInterceptorTriggerName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: triggerName}},
+				{Name: WextInterceptorRepoURL, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: repoURL}},
+				{Name: WextInterceptorEvent, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: eventType}},
+				{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: secretName}}},
+			ObjectRef: &corev1.ObjectReference{
+				APIVersion: "v1",
+				Kind:       "Service",
+				Name:       "tekton-webhooks-extension-validator",
+				Namespace:  interceptorNamespace,
+			},
+		},
+	}
+}
+
+// getMonitorTriggerParams returns parameters to be used by the monitor trigger
+func getMonitorTriggerParams(cg *client.Group, w models.Webhook) []pipelinesv1alpha1.Param {
+	return []pipelinesv1alpha1.Param{
+		{Name: "gitsecretname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.AccessTokenRef}},
+		{Name: "gitsecretkeyname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: accessToken}},
+		{Name: "dashboardurl", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: getDashboardURL(cg)}},
+	}
+}
+
+// getPipelineTriggerParams returns parameters according to the specified
+// webhook for the pipeline trigger
+func getPipelineTriggerParams(w models.Webhook) []pipelinesv1alpha1.Param {
+	return []pipelinesv1alpha1.Param{
+		{Name: "webhooks-tekton-target-namespace", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.Namespace}},
+		{Name: "webhooks-tekton-service-account", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.ServiceAccount}},
+		{Name: "webhooks-tekton-git-server", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "server"}},
+		{Name: "webhooks-tekton-git-org", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "org"}},
+		{Name: "webhooks-tekton-git-repo", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repo"}},
+	}
+}
+
+// triggerToWebhook attempts to convert an EventListenerTrigger into a Webhook
+func triggerToWebhook(t triggersv1alpha1.EventListenerTrigger) (*models.Webhook, error) {
+	if err := checkTrigger(t); err != nil {
+		return nil, err
+	}
+	w := &models.Webhook{
+		Name:             t.Params[0].Value.StringVal,
+		Namespace:        t.Params[1].Value.StringVal,
+		ServiceAccount:   t.Params[2].Value.StringVal,
+		DockerRegistry:   t.Params[3].Value.StringVal,
+		AccessTokenRef:   t.Interceptor.Header[3].Value.StringVal,
+		Pipeline:         getWebhookNameFromTrigger(t),
+		GitRepositoryURL: t.Interceptor.Header[2].Value.StringVal,
+	}
+	return w, nil
+}
+
+// filterWebhooksByRepo returns the filtered set of webhooks that match the repo
+func filterWebhooksByRepo(webhooks []models.Webhook, repoURL string) []models.Webhook {
+	filteredWebhooks := []models.Webhook{}
+	for _, webhook := range webhooks {
+		if webhook.GitRepositoryURL == repoURL {
+			filteredWebhooks = append(filteredWebhooks, webhook)
+		}
+	}
+	return filteredWebhooks
+}
+
+// findWebhookByName the named webhook from the list and errors if not found
+func findWebhookByName(webhooks []models.Webhook, name string) (*models.Webhook, error) {
+	for _, webhook := range webhooks {
+		if webhook.Name == name {
+			return &webhook, nil
+		}
+	}
+	return nil, xerrors.New("Webhook not found")
+}
+
+// getWebhookNameFromTrigger gets the name of a webhook given a Trigger
+func getWebhookNameFromTrigger(t triggersv1alpha1.EventListenerTrigger) string {
+	return strings.TrimSuffix(t.Template.Name, fmt.Sprintf("-%s", triggerTemplatePostfix))
+}
+
+// getBaseEventListener returns the base EventListener. Triggers must be added
+// before creating to pass validation
+func getBaseEventListener(installNamespace string) *triggersv1alpha1.EventListener {
+	return &triggersv1alpha1.EventListener{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      eventListenerName,
+			Namespace: installNamespace,
+		},
+		Spec: triggersv1alpha1.EventListenerSpec{
+			ServiceAccountName: eventListenerSA,
+		},
+	}
+}
+
+// getWebhookEventListener returns the singleton EventListener used for webhooks
+func getWebhookEventListener(cg *client.Group) (*triggersv1alpha1.EventListener, error) {
+	return cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
+}
+
+// createEventListener attempts to the create the EventListener
+func createEventListener(cg *client.Group, el *triggersv1alpha1.EventListener) error {
+	_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Create(el)
+	return err
+}
+
+// updateEventListener attempts to update the EventListener
+func updateEventListener(cg *client.Group, el *triggersv1alpha1.EventListener) error {
+	_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Update(el)
+	return err
+}
+
+// deleteEventListener attempts to delete the EventListener
+func deleteEventListener(cg *client.Group, elName string) error {
+	return cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Delete(elName, &metav1.DeleteOptions{})
+}
+
+// getWebhooksFromEventListener returns all the webhooks on the EventListener.
+// When webhooks are created, multiple triggers are created with identical
+// information so the pull trigger is arbitrary choosen to represent the webhook
+func getWebhooksFromEventListener(el triggersv1alpha1.EventListener) []models.Webhook {
+	logging.Log.Info("Getting webhooks from eventlistener")
+	hooks := []models.Webhook{}
+	for _, trigger := range el.Spec.Triggers {
+		if strings.HasSuffix(trigger.Name, pullTriggerBindingPostfix) {
+			if hook, err := triggerToWebhook(trigger); err != nil {
+				hooks = append(hooks, *hook)
+			}
+		}
+	}
+	return hooks
+}
+
+// checkTrigger returns an error if the Trigger is not formatted as expected
+func checkTrigger(t triggersv1alpha1.EventListenerTrigger) error {
+	// TODO
+	return nil
+}
+
+// waitForEventListenerStatus polls the created webhook EventListener until the
+// EventListenerStatus is populated, which ensures the backing service is
+// created.
+func waitForEventListenerStatus(cg *client.Group) (*triggersv1alpha1.EventListener, error) {
+	for {
+		el, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		if el.Status.Configuration.GeneratedResourceName != "" {
+			return el, nil
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
+}
+
+// getGitValues extracts information from the url assuming it has already been
+// validated by `sanitizeGitURL`
+func getGitValues(u url.URL) (server, org, repo string) {
+	// The Path should be in the form: /org/repo
+	lastIndex := strings.LastIndex(u.Path, "/")
+	return u.Host, u.Path[1:lastIndex], u.Path[lastIndex+1:]
+}
+
+// getWebhookSecretTokens returns the secretToken and accessToken stored in the
+// Secret
+func getWebhookSecretTokens(cg *client.Group, secretName string) (accessToken string, secretToken string, err error) {
+	secret, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Get(secretName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", xerrors.Errorf("Error getting Webhook secret. Error was: %w", err)
+	}
+	accessToken = string(secret.Data[accessToken])
+	secretToken = string(secret.Data[secretToken])
+	return accessToken, secretToken, nil
+}
 
 // sanitizeGitURL returns a URL for the specified rawurl string, where
 // the .git suffix is removed. The rawurl must have the following format:
@@ -87,852 +719,43 @@ func sanitizeGitURL(rawurl string) (*url.URL, error) {
 	return url, nil
 }
 
-// createEventListener creates the singleton eventListener for webhooks. This
-// should only be called if the EventListener does not exist
-func (r Resource) createEventListener() (*v1alpha1.EventListener, error) {
-	eventListener := v1alpha1.EventListener{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      eventListenerName,
-			Namespace: r.Defaults.Namespace,
-		},
-		Spec: v1alpha1.EventListenerSpec{
-			ServiceAccountName: eventListenerSA,
-		},
-	}
-	return r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Create(&eventListener)
-}
-
-// updateEventListener updates the EventListener with additional triggers
-// according to the specified webhook.
-func (r Resource) updateEventListener(eventListener *v1alpha1.EventListener, webhook webhook) (*v1alpha1.EventListener, error) {
-	hookParams, monitorParams := r.getParams(webhook)
-
-	newPushTrigger := r.newTrigger(fmt.Sprintf("%s-%s-push-event", webhook.Name, webhook.Namespace),
-		fmt.Sprintf("%s-push-binding", webhook.Pipeline),
-		fmt.Sprintf("%s-template", webhook.Pipeline),
-		webhook.GitRepositoryURL,
-		"push",
-		webhook.AccessTokenRef,
-		hookParams)
-
-	newPullRequestTrigger := r.newTrigger(fmt.Sprintf("%s-%s-pullrequest-event", webhook.Name, webhook.Namespace),
-		fmt.Sprintf("%s-pullrequest-binding", webhook.Pipeline),
-		fmt.Sprintf("%s-template", webhook.Pipeline),
-		webhook.GitRepositoryURL,
-		"pull_request",
-		webhook.AccessTokenRef,
-		hookParams)
-
-	monitorTrigger := r.newTrigger("monitor-task",
-		fmt.Sprintf("%s-binding", webhook.Pipeline),
-		fmt.Sprintf("%s-template", webhook.Pipeline),
-		webhook.GitRepositoryURL,
-		"pull_request",
-		webhook.AccessTokenRef,
-		monitorParams)
-
-	newTriggers := []v1alpha1.EventListenerTrigger{newPushTrigger, newPullRequestTrigger, monitorTrigger}
-
-	eventListener.Spec.Triggers = append(eventListener.Spec.Triggers, newTriggers...)
-	return r.TriggersClient.TektonV1alpha1().EventListeners(eventListener.GetNamespace()).Update(eventListener)
-}
-
-// newTrigger creates a new Trigger according to the specified parameters
-func (r Resource) newTrigger(name, bindingName, templateName, repoURL, event, secretName string, params []pipelinesv1alpha1.Param) v1alpha1.EventListenerTrigger {
-	return v1alpha1.EventListenerTrigger{
-		Name: name,
-		Binding: v1alpha1.EventListenerBinding{
-			Name:       bindingName,
-			APIVersion: "v1alpha1",
-		},
-		Params: params,
-		Template: v1alpha1.EventListenerTemplate{
-			Name:       templateName,
-			APIVersion: "v1alpha1",
-		},
-		Interceptor: &v1alpha1.EventInterceptor{
-			Header: []pipelinesv1alpha1.Param{
-				{Name: "Wext-Trigger-Name", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: name}},
-				{Name: "Wext-Repository-Url", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: repoURL}},
-				{Name: "Wext-Incoming-Event", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: event}},
-				{Name: "Wext-Secret-Name", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: secretName}}},
-			ObjectRef: &corev1.ObjectReference{
-				APIVersion: "v1",
-				Kind:       "Service",
-				Name:       "tekton-webhooks-extension-validator",
-				Namespace:  r.Defaults.Namespace,
-			},
-		},
-	}
-}
-
-// getMonitorTriggerParams returns parameters according to the specified webhook
-// for the monitor trigger
-func (r Resource) getMonitorTriggerParams(w webhook) []pipelinesv1alpha1.Param {
-	return []pipelinesv1alpha1.Param{
-		{Name: "gitsecretname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.AccessTokenRef}},
-		{Name: "gitsecretkeyname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "accessToken"}},
-		{Name: "dashboardurl", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: r.getDashboardURL()}},
-	}
-}
-
-// getPipelineTriggerParams returns parameters according to the specified
-// webhook for the pipeline trigger
-func (r Resource) getPipelineTriggerParams(w webhook) []pipelinesv1alpha1.Param {
-	return []pipelinesv1alpha1.Param{
-		{Name: "webhooks-tekton-release-name", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.GitRepositoryURL}},
-		{Name: "webhooks-tekton-target-namespace", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.Namespace}},
-		{Name: "webhooks-tekton-service-account", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.ServiceAccount}},
-		{Name: "webhooks-tekton-git-server", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "server"}},
-		{Name: "webhooks-tekton-git-org", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "org"}},
-		{Name: "webhooks-tekton-git-repo", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repo"}},
-	}
-}
-
-func (r Resource) getParams(webhook webhook) (webhookParams, monitorParams []pipelinesv1alpha1.Param) {
-	saName := webhook.ServiceAccount
-	if saName == "" {
-		saName = "default"
-	}
-	server, org, repo, err := getGitValues(webhook.GitRepositoryURL)
-	if err != nil {
-		logging.Log.Errorf("error returned from getGitValues: %s", err)
-	}
-	server = strings.TrimPrefix(server, "https://")
-	server = strings.TrimPrefix(server, "http://")
-
-	hookParams := []pipelinesv1alpha1.Param{
-		{Name: "webhooks-tekton-release-name", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: webhook.GitRepositoryURL}},
-		{Name: "webhooks-tekton-target-namespace", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: webhook.Namespace}},
-		{Name: "webhooks-tekton-service-account", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: webhook.ServiceAccount}},
-		{Name: "webhooks-tekton-git-server", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: server}},
-		{Name: "webhooks-tekton-git-org", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: org}},
-		{Name: "webhooks-tekton-git-repo", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: repo}}}
-
-	if webhook.DockerRegistry != "" {
-		hookParams = append(hookParams, pipelinesv1alpha1.Param{Name: "webhooks-tekton-docker-registry", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: webhook.DockerRegistry}})
-	}
-
-	prMonitorParams := []pipelinesv1alpha1.Param{
-		{Name: "gitsecretname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: webhook.AccessTokenRef}},
-		{Name: "gitsecretkeyname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "accessToken"}},
-		{Name: "dashboardurl", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: r.getDashboardURL()}},
-	}
-
-	return hookParams, prMonitorParams
-}
-
-func (r Resource) getDashboardURL() string {
+// getDashboardURL gets the URL of the Dashboard
+func getDashboardURL(cg *client.Group) string {
 	type element struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`
 	}
 
-	toReturn := "http://localhost:9097/"
+	dashboardURL := "http://localhost:9097/"
 
 	labelLookup := "app=tekton-dashboard"
-	if "openshift" == os.Getenv("PLATFORM") {
+	if cg.Defaults.Platform == "openshift" {
 		labelLookup = "app=tekton-dashboard-internal"
 	}
 
-	services, err := r.K8sClient.CoreV1().Services(r.Defaults.Namespace).List(metav1.ListOptions{LabelSelector: labelLookup})
-	if err != nil {
-		logging.Log.Errorf("could not find the dashboard's service - error: %s", err.Error())
-		return toReturn
+	services, err := cg.K8sClient.CoreV1().Services(cg.Defaults.Namespace).List(metav1.ListOptions{LabelSelector: labelLookup})
+	if err != nil || len(services.Items) == 0 {
+		logging.Log.Errorf("Could not find the Dashboard's Service")
+		return dashboardURL
 	}
 
-	if len(services.Items) == 0 {
-		logging.Log.Error("could not find the dashboard's service")
-		return toReturn
-	}
-
-	name := services.Items[0].GetName()
-	proto := services.Items[0].Spec.Ports[0].Name
+	name := services.Items[0].Name
+	scheme := services.Items[0].Spec.Ports[0].Name
 	port := services.Items[0].Spec.Ports[0].Port
-	url := fmt.Sprintf("%s://%s:%d/v1/namespaces/%s/endpoints", proto, name, port, r.Defaults.Namespace)
-	logging.Log.Debugf("using url: %s", url)
-	resp, err := http.DefaultClient.Get(url)
+	dashboardURL = fmt.Sprintf("%s://%s:%d/v1/namespaces/%s/endpoints", scheme, name, port, cg.Defaults.Namespace)
+	logging.Log.Debugf("Using url: %s", dashboardURL)
+	resp, err := http.DefaultClient.Get(dashboardURL)
 	if err != nil {
-		logging.Log.Errorf("error occurred when hitting the endpoints REST endpoint: %s", err.Error())
-		return url
+		logging.Log.Errorf("Error getting endpoints from url: %s", err.Error())
+		return dashboardURL
 	}
 	if resp.StatusCode != 200 {
-		logging.Log.Errorf("return code was not 200 when hitting the endpoints REST endpoint, code returned was: %d", resp.StatusCode)
-		return url
+		logging.Log.Errorf("Return code was not 200 when hitting the endpoints REST endpoint, code returned was: %d", resp.StatusCode)
+		return dashboardURL
 	}
 
 	bodyJSON := []element{}
 	json.NewDecoder(resp.Body).Decode(&bodyJSON)
+	// Return the first URL received from the Dashboard
 	return bodyJSON[0].URL
 }
-
-// getGitValues processes a git URL into component parts, all of which are
-// lowercased to try and avoid problems matching strings.
-func getGitValues(url string) (gitServer, gitOwner, gitRepo string, err error) {
-	repoURL := ""
-	prefix := ""
-	if url != "" {
-		url = strings.ToLower(url)
-		if strings.Contains(url, "https://") {
-			repoURL = strings.TrimPrefix(url, "https://")
-			prefix = "https://"
-		} else {
-			repoURL = strings.TrimPrefix(url, "http://")
-			prefix = "http://"
-		}
-	}
-	// example at this point: github.com/tektoncd/pipeline
-	numSlashes := strings.Count(repoURL, "/")
-	if numSlashes < 2 {
-		return "", "", "", errors.New("URL didn't contain an owner and repository")
-	}
-	repoURL = strings.TrimSuffix(repoURL, "/")
-	gitServer = prefix + repoURL[0:strings.Index(repoURL, "/")]
-	gitOwner = repoURL[strings.Index(repoURL, "/")+1 : strings.LastIndex(repoURL, "/")]
-	//need to cut off the .git
-	if strings.HasSuffix(url, ".git") {
-		gitRepo = repoURL[strings.LastIndex(repoURL, "/")+1 : len(repoURL)-4]
-	} else {
-		gitRepo = repoURL[strings.LastIndex(repoURL, "/")+1:]
-	}
-
-	return gitServer, gitOwner, gitRepo, nil
-}
-
-// createWebhook creates a webhook for a given repository and populates
-// (creating if doesn't yet exist) a ConfigMap storing this information
-func (r Resource) CreateWebhook(request *restful.Request, response *restful.Response) {
-	modifyingConfigMapLock.Lock()
-	defer modifyingConfigMapLock.Unlock()
-
-	logging.Log.Infof("Webhook creation request received with request: %+v.", request)
-
-	webhook := webhook{}
-	if err := request.ReadEntity(&webhook); err != nil {
-		err = xerrors.Errorf("Error trying to read request entity as webhook %s", err)
-		utils.RespondError(response, err, http.StatusBadRequest)
-		return
-	}
-	if err := checkWebhook(webhook); err != nil {
-		utils.RespondError(response, err, http.StatusBadRequest)
-		return
-	}
-	_, err := sanitizeGitURL(webhook.GitRepositoryURL)
-	if err != nil {
-		err = xerrors.Errorf("Invalid value webhook URL: %s", err)
-		utils.RespondError(response, err, http.StatusBadRequest)
-		return
-	}
-
-	// hooks, err := r.getGitHubWebhooksFromConfigMap(gitURL)
-	// if len(hooks) > 0 {
-	// 	for _, hook := range hooks {
-	// 		if hook.Name == webhook.Name && hook.Namespace == webhook.Namespace {
-	// 			logging.Log.Errorf("Error creating webhook: A webhook already exists for GitRepositoryURL %+v with the Name %s and Namespace %s.", webhook.GitRepositoryURL, webhook.Name, webhook.Namespace)
-	// 			utils.RespondError(response, errors.New("Webhook already exists for the specified Git repository with the same name, targeting the same namespace"), http.StatusBadRequest)
-	// 			return
-	// 		}
-	// 		if hook.Pipeline == webhook.Pipeline && hook.Namespace == webhook.Namespace {
-	// 			logging.Log.Errorf("Error creating webhook: A webhook already exists for GitRepositoryURL %+v, running pipeline %s in namespace %s.", webhook.GitRepositoryURL, webhook.Pipeline, webhook.Namespace)
-	// 			utils.RespondError(response, errors.New("Webhook already exists for the specified Git repository, running the same pipeline in the same namespace"), http.StatusBadRequest)
-	// 			return
-	// 		}
-	// 	}
-	// }
-
-	_, templateErr := r.TriggersClient.TektonV1alpha1().TriggerTemplates(r.Defaults.Namespace).Get(webhook.Pipeline+"-template", metav1.GetOptions{})
-	_, pushErr := r.TriggersClient.TektonV1alpha1().TriggerBindings(r.Defaults.Namespace).Get(webhook.Pipeline+"-push-binding", metav1.GetOptions{})
-	_, pullrequestErr := r.TriggersClient.TektonV1alpha1().TriggerBindings(r.Defaults.Namespace).Get(webhook.Pipeline+"-pullrequest-binding", metav1.GetOptions{})
-	if templateErr != nil || pushErr != nil || pullrequestErr != nil {
-		msg := fmt.Sprintf("Could not find the required trigger template or trigger bindings in namespace: %s. Expected to find: %s, %s and %s", r.Defaults.Namespace, webhook.Pipeline+"-template", webhook.Pipeline+"-push-binding", webhook.Pipeline+"-pullrequest-binding")
-		logging.Log.Errorf("%s", msg)
-		utils.RespondError(response, errors.New(msg), http.StatusBadRequest)
-		return
-	}
-
-	// Single monitor trigger for all triggers on a repo - thus name to use for monitor is
-	// monitorTriggerName := strings.TrimPrefix(gitServer+"/"+gitOwner+"/"+gitRepo, "http://")
-	// monitorTriggerName = strings.TrimPrefix(monitorTriggerName, "https://")
-	// monitorTriggerName := webhook.GitRepositoryURL
-
-	// eventListener, err := r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
-	// if err != nil {
-	// 	if !k8serrors.IsNotFound(err) {
-	// 		err = errors.Wrap(err, "Webhook creation failure")
-	// 		logging.Log.Error(err)
-	// 		utils.RespondError(response, errors.New(msg), http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// 	eventListener, err = r.createEventListener()
-	// 	if err != nil {
-	// 		err = errors.Wrap(err, "Webhook creation failure")
-	// 		logging.Log.Error(err)
-	// 		utils.RespondError(response, err, http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// }
-	// _, err = r.updateEventListener(eventListener, webhook, monitorTriggerName)
-	// if err != nil {
-	// 	err = errors.Wrap(err, "Webhook creation failure")
-	// 	logging.Log.Error(err)
-	// 	utils.RespondError(response, err, http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// // Loop until the EventListener status is populated
-	// for eventListener.Status.Configuration.GeneratedResourceName == "" {
-	// 	time.Sleep(time.Millisecond * 100)
-	// 	eventListener, err := r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
-	// 	if err != nil {
-	// 		err = errors.Wrap(err, "Webhook creation failure")
-	// 		logging.Log.Error(err)
-	// 		utils.RespondError(response, err, http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// }
-
-	// if strings.Contains(strings.ToLower(r.Defaults.Platform), "openshift") {
-	// 	r.RoutesClient.RouteV1().Routes()
-	// } else {
-	// 	err = r.createDeleteIngress("create")
-	// 	if err != nil {
-	// 		err = errors.Wrap(err, "Webhook creation failure")
-	// 		logging.Log.Error(err)
-	// 		logging.Log.Debugf("Deleting eventlistener as failed creating Ingress")
-	// 		err2 := r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Delete(eventListenerName, &metav1.DeleteOptions{})
-	// 		if err2 != nil {
-	// 			updatedMsg := fmt.Sprintf("error creating webhook due to error creating taskrun to create ingress. Also failed to cleanup and delete eventlistener. Errors were: %s and %s", err, err2)
-	// 			utils.RespondError(response, errors.New(updatedMsg), http.StatusInternalServerError)
-	// 			return
-	// 		}
-	// 		utils.RespondError(response, errors.New(msg), http.StatusInternalServerError)
-	// 		return
-	// 	} else {
-	// 		logging.Log.Debug("ingress creation taskrun succeeded")
-	// 	}
-	// }
-
-	// if len(hooks) == 0 {
-	// 	webhookTaskRun, err := r.createGitHubWebhookTaskRun("create", sanitisedURL, gitServer, webhook)
-	// 	if err != nil {
-	// 		msg := fmt.Sprintf("error creating taskrun to create github webhook. Error was: %s", err)
-	// 		logging.Log.Errorf("%s", msg)
-	// 		err2 := r.deleteFromEventListener(webhook.Name+"-"+webhook.Namespace, monitorTriggerName, webhook.GitRepositoryURL)
-	// 		if err2 != nil {
-	// 			updatedMsg := fmt.Sprintf("error creating webhook creation taskrun. Also failed to cleanup and delete entry from eventlistener. Errors were: %s and %s", err, err2)
-	// 			utils.RespondError(response, errors.New(updatedMsg), http.StatusInternalServerError)
-	// 			return
-	// 		}
-	// 		utils.RespondError(response, errors.New(msg), http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// 	webhookTaskRunResult, err := r.checkTaskRunSucceeds(webhookTaskRun)
-	// 	if !webhookTaskRunResult && err != nil {
-	// 		msg := fmt.Sprintf("error in taskrun creating webhook. Error was: %s", err)
-	// 		logging.Log.Errorf("%s", msg)
-	// 		utils.RespondError(response, errors.New(msg), http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// 	logging.Log.Debug("webhook taskrun succeeded")
-	// } else {
-	// 	logging.Log.Debugf("webhook already exists for repository %s - not creating new hook in GitHub", sanitisedURL)
-	// }
-
-	// webhooks, err := r.readGitHubWebhooksFromConfigMap()
-	// if err != nil {
-	// 	logging.Log.Errorf("error getting GitHub webhooks: %s.", err.Error())
-	// 	utils.RespondError(response, err, http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// webhooks[sanitisedURL] = append(webhooks[sanitisedURL], webhook)
-	// logging.Log.Debugf("Writing the GitHubSource webhook ConfigMap in namespace %s", r.Defaults.Namespace)
-	// r.writeGitHubWebhooks(webhooks)
-	// response.WriteHeader(http.StatusCreated)
-}
-
-func (r Resource) createDeleteIngress(mode string) error {
-	if mode == "create" {
-		// Unlike webhook creation, the ingress does not need a protocol specified
-		callback := strings.TrimPrefix(r.Defaults.CallbackURL, "http://")
-		callback = strings.TrimPrefix(callback, "https://")
-
-		ingress := &v1beta1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "el-" + eventListenerName,
-				Namespace: r.Defaults.Namespace,
-			},
-			Spec: v1beta1.IngressSpec{
-				Rules: []v1beta1.IngressRule{
-					{
-						Host: callback,
-						IngressRuleValue: v1beta1.IngressRuleValue{
-							HTTP: &v1beta1.HTTPIngressRuleValue{
-								Paths: []v1beta1.HTTPIngressPath{
-									{
-										Backend: v1beta1.IngressBackend{
-											ServiceName: "el-" + eventListenerName,
-											ServicePort: intstr.IntOrString{
-												Type:   intstr.Int,
-												IntVal: 8080,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-		ingress, err := r.K8sClient.ExtensionsV1beta1().Ingresses(r.Defaults.Namespace).Create(ingress)
-		if err != nil {
-			return err
-		}
-		logging.Log.Debug("Ingress has been created")
-		return nil
-	} else if mode == "delete" {
-		err := r.K8sClient.ExtensionsV1beta1().Ingresses(r.Defaults.Namespace).Delete("el-"+eventListenerName, &metav1.DeleteOptions{})
-		if err != nil {
-			return err
-		}
-		logging.Log.Debug("Ingress has been deleted")
-		return nil
-	} else {
-		logging.Log.Debug("Wrong mode")
-		return errors.New("Wrong mode for createDeleteIngress")
-	}
-}
-
-func (r Resource) createGitHubWebhookTaskRun(mode, gitRepoURL, gitServer string, webhook webhook) (*pipelinesv1alpha1.TaskRun, error) {
-	params := []pipelinesv1alpha1.Param{
-		{Name: "Mode", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: mode}},
-		{Name: "CallbackURL", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: r.Defaults.CallbackURL}},
-		{Name: "GitHubRepoURL", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: gitRepoURL}},
-		{Name: "GitHubSecretName", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: webhook.AccessTokenRef}},
-		{Name: "GitHubAccessTokenKey", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "accessToken"}},
-		{Name: "GitHubUserNameKey", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: ""}},
-		{Name: "GitHubSecretStringKey", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secretToken"}},
-		{Name: "GitHubServerUrl", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: gitServer}}}
-
-	webhookTaskRun := pipelinesv1alpha1.TaskRun{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: mode + "-webhook-",
-			Namespace:    r.Defaults.Namespace,
-		},
-		Spec: pipelinesv1alpha1.TaskRunSpec{
-			Inputs: pipelinesv1alpha1.TaskRunInputs{
-				Params: params,
-			},
-			ServiceAccount: os.Getenv("SERVICE_ACCOUNT"),
-			TaskRef: &pipelinesv1alpha1.TaskRef{
-				Name: "webhook-task",
-			},
-		},
-	}
-
-	tr, err := r.TektonClient.TektonV1alpha1().TaskRuns(r.Defaults.Namespace).Create(&webhookTaskRun)
-	if err != nil {
-		return &pipelinesv1alpha1.TaskRun{}, err
-	}
-	logging.Log.Debugf("Webhook being created/deleted under taskrun %s", tr.GetName())
-
-	return tr, nil
-}
-
-func (r Resource) checkTaskRunSucceeds(originalTaskRun *pipelinesv1alpha1.TaskRun) (bool, error) {
-	var err error
-	retries := 1
-	for retries < 120 {
-		taskRun, err := r.TektonClient.TektonV1alpha1().TaskRuns(r.Defaults.Namespace).Get(originalTaskRun.Name, metav1.GetOptions{})
-		if err != nil {
-			logging.Log.Debugf("Error occured retrieving taskrun %s.", originalTaskRun.Name)
-			return false, err
-		}
-		if taskRun.IsDone() {
-			if taskRun.IsSuccessful() {
-				return true, nil
-			}
-			if taskRun.IsCancelled() {
-				err = errors.New("taskrun " + taskRun.Name + " is in a cancelled state")
-				return false, err
-			}
-			err = errors.New("taskrun " + taskRun.Name + " is in a failed or unknown state")
-			return false, err
-		}
-		time.Sleep(1 * time.Second)
-		retries = retries + 1
-	}
-
-	err = errors.New("taskrun " + originalTaskRun.Name + " is not reporting as successful or cancelled")
-	return false, err
-}
-
-// // Removes from ConfigMap, removes the actual GitHubSource, removes the webhook
-func DeleteWebhook(request *restful.Request, response *restful.Response) {}
-
-// 	modifyingConfigMapLock.Lock()
-// 	defer modifyingConfigMapLock.Unlock()
-// 	logging.Log.Debug("In deleteWebhook")
-// 	name := request.PathParameter("name")
-// 	repo := request.QueryParameter("repository")
-// 	namespace := request.QueryParameter("namespace")
-// 	deletePipelineRuns := request.QueryParameter("deletepipelineruns")
-
-// 	var toDeletePipelineRuns = false
-// 	var err error
-
-// 	if deletePipelineRuns != "" {
-// 		toDeletePipelineRuns, err = strconv.ParseBool(deletePipelineRuns)
-// 		if err != nil {
-// 			theError := errors.New("bad request information provided, cannot handle deletepipelineruns query (should be set to true or not provided)")
-// 			logging.Log.Error(theError)
-// 			utils.RespondError(response, theError, http.StatusInternalServerError)
-// 			return
-// 		}
-// 	}
-
-// 	if namespace == "" || repo == "" {
-// 		theError := errors.New("bad request information provided, a namespace and a repository must be specified as query parameters")
-// 		logging.Log.Error(theError)
-// 		utils.RespondError(response, theError, http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	logging.Log.Debugf("in deleteWebhook, name: %s, repo: %s, delete pipeline runs: %s", name, repo, deletePipelineRuns)
-
-// 	webhooks, err := r.getGitHubWebhooksFromConfigMap(repo)
-// 	if err != nil {
-// 		utils.RespondError(response, err, http.StatusNotFound)
-// 		return
-// 	}
-
-// 	logging.Log.Debugf("Found %d webhooks/pipelines registered against repo %s", len(webhooks), repo)
-// 	if len(webhooks) < 1 {
-// 		err := fmt.Errorf("no webhook found for repo %s", repo)
-// 		logging.Log.Error(err)
-// 		utils.RespondError(response, err, http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	gitServer, gitOwner, gitRepo, err := getGitValues(repo)
-// 	// Single monitor trigger for all triggers on a repo - thus name to use for monitor is
-// 	monitorTriggerName := strings.TrimPrefix(gitServer+"/"+gitOwner+"/"+gitRepo, "http://")
-// 	monitorTriggerName = strings.TrimPrefix(monitorTriggerName, "https://")
-
-// 	found := false
-// 	var remaining int
-// 	for _, hook := range webhooks {
-// 		if hook.Name == name && hook.Namespace == namespace {
-// 			found = true
-// 			if len(webhooks) == 1 {
-// 				logging.Log.Debug("No other pipelines triggered by this GitHub webhook, deleting webhook")
-// 				remaining = 0
-// 				sanitisedURL := gitServer + "/" + gitOwner + "/" + gitRepo
-// 				deleteWebhookTaskRun, err := r.createGitHubWebhookTaskRun("delete", sanitisedURL, gitServer, hook)
-// 				if err != nil {
-// 					logging.Log.Error(err)
-// 					theError := errors.New("error during creation of taskrun to delete webhook. ")
-// 					utils.RespondError(response, theError, http.StatusInternalServerError)
-// 					return
-// 				}
-
-// 				webhookDeleted, err := r.checkTaskRunSucceeds(deleteWebhookTaskRun)
-// 				if !webhookDeleted && err != nil {
-// 					logging.Log.Error(err)
-// 					theError := errors.New("error during taskrun deleting webhook.")
-// 					utils.RespondError(response, theError, http.StatusInternalServerError)
-// 					return
-// 				} else {
-// 					logging.Log.Debug("Webhook deletion taskrun succeeded")
-// 				}
-// 			} else {
-// 				remaining = len(webhooks) - 1
-// 			}
-// 			if toDeletePipelineRuns {
-// 				r.deletePipelineRuns(repo, namespace, hook.Pipeline)
-// 			}
-// 			err := r.deleteWebhookFromConfigMap(repo, name, namespace, remaining)
-// 			if err != nil {
-// 				logging.Log.Error(err)
-// 				theError := errors.New("error deleting webhook from configmap.")
-// 				utils.RespondError(response, theError, http.StatusInternalServerError)
-// 				return
-// 			}
-
-// 			eventListenerEntryPrefix := name + "-" + namespace
-// 			err = r.deleteFromEventListener(eventListenerEntryPrefix, monitorTriggerName, repo)
-// 			if err != nil {
-// 				logging.Log.Error(err)
-// 				theError := errors.New("error deleting webhook from eventlistener.")
-// 				utils.RespondError(response, theError, http.StatusInternalServerError)
-// 				return
-// 			}
-
-// 			response.WriteHeader(204)
-// 		}
-// 	}
-
-// 	if !found {
-// 		err := fmt.Errorf("no webhook found for repo %s with name %s associated with namespace %s", repo, name, namespace)
-// 		logging.Log.Error(err)
-// 		utils.RespondError(response, err, http.StatusNotFound)
-// 		return
-// 	}
-
-// }
-
-// func (r Resource) deleteFromEventListener(name, monitorTriggerName, repoOnParams string) error {
-// 	logging.Log.Debugf("Deleting triggers for %s from the eventlistener", name)
-// 	el, err := r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	toRemove := []string{name + "-push-event", name + "-pullrequest-event"}
-
-// 	newTriggers := []v1alpha1.EventListenerTrigger{}
-// 	currentTriggers := el.Spec.Triggers
-
-// 	monitorTrigger := v1alpha1.EventListenerTrigger{}
-// 	triggersOnRepo := 0
-// 	triggersDeleted := 0
-
-// 	for _, t := range currentTriggers {
-// 		if t.Name == monitorTriggerName {
-// 			monitorTrigger = t
-// 		} else {
-// 			interceptorParams := t.Interceptor.Header
-// 			for _, p := range interceptorParams {
-// 				if p.Name == "Wext-Repository-Url" && p.Value.StringVal == repoOnParams {
-// 					triggersOnRepo++
-// 				}
-// 			}
-// 			found := false
-// 			for _, triggerName := range toRemove {
-// 				if triggerName == t.Name {
-// 					triggersDeleted++
-// 					found = true
-// 					break
-// 				}
-// 			}
-// 			if !found {
-// 				newTriggers = append(newTriggers, t)
-// 			}
-// 		}
-// 	}
-
-// 	if triggersOnRepo > triggersDeleted {
-// 		newTriggers = append(newTriggers, monitorTrigger)
-// 	}
-
-// 	if len(newTriggers) == 0 {
-// 		err = r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Delete(el.GetName(), &metav1.DeleteOptions{})
-// 		if err != nil {
-// 			return err
-// 		}
-
-// 		_, varExists := os.LookupEnv("PLATFORM")
-// 		if !varExists {
-// 			err = r.createDeleteIngress("delete")
-// 			if err != nil {
-// 				logging.Log.Errorf("error deleting ingress: %s", err)
-// 				return err
-// 			} else {
-// 				logging.Log.Debug("Ingress deleted")
-// 				return nil
-// 			}
-// 		} else {
-// 			routeTaskRun, err := r.createRouteTaskRun("delete")
-// 			if err != nil {
-// 				msg := fmt.Sprintf("error deleting webhook due to error creating taskrun to delete route. Error was: %s", err)
-// 				logging.Log.Errorf("%s", msg)
-// 				return err
-// 			}
-// 			routeTaskRunResult, err := r.checkTaskRunSucceeds(routeTaskRun)
-// 			if !routeTaskRunResult && err != nil {
-// 				msg := fmt.Sprintf("error deleting webhook due to error in taskrun to delete route. Error was: %s", err)
-// 				logging.Log.Errorf("%s", msg)
-// 				return err
-// 			} else {
-// 				logging.Log.Debug("route deletion taskrun succeeded")
-// 			}
-// 		}
-
-// 	} else {
-// 		el.Spec.Triggers = newTriggers
-// 		_, err = r.TriggersClient.TektonV1alpha1().EventListeners(r.Defaults.Namespace).Update(el)
-// 		if err != nil {
-// 			logging.Log.Errorf("error updating eventlistener: %s", err)
-// 			return err
-// 		}
-// 	}
-
-// 	return err
-// }
-
-// Delete the webhook information from our ConfigMap
-// func (r Resource) deleteWebhookFromConfigMap(repository, webhookName, namespace string, remainingCount int) error {
-// 	logging.Log.Debugf("Deleting webhook info named %s on repository %s running in namespace %s from ConfigMap", webhookName, repository, namespace)
-// 	repository = strings.ToLower(strings.TrimSuffix(repository, ".git"))
-// 	allHooks, err := r.readGitHubWebhooksFromConfigMap()
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	if remainingCount > 0 {
-// 		logging.Log.Debugf("Finding webhook for repository %s", repository)
-// 		for i, hook := range allHooks[repository] {
-// 			if hook.Name == webhookName && hook.Namespace == namespace {
-// 				logging.Log.Debugf("Removing webhook from ConfigMap")
-// 				allHooks[repository][i] = allHooks[repository][len(allHooks[repository])-1]
-// 				allHooks[repository] = allHooks[repository][:len(allHooks[repository])-1]
-// 			}
-// 		}
-// 	} else {
-// 		logging.Log.Debugf("Deleting last webhook for repository %s", repository)
-// 		delete(allHooks, repository)
-// 	}
-
-// 	err = r.writeGitHubWebhooks(allHooks)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
-func (r Resource) GetAllWebhooks(request *restful.Request, response *restful.Response) {}
-
-// 	logging.Log.Debugf("Get all webhooks")
-// 	sources, err := r.readGitHubWebhooksFromConfigMap()
-// 	if err != nil {
-// 		logging.Log.Errorf("error trying to get webhooks: %s.", err.Error())
-// 		utils.RespondError(response, err, http.StatusInternalServerError)
-// 		return
-// 	}
-// 	sourcesList := []webhook{}
-// 	for _, value := range sources {
-// 		sourcesList = append(sourcesList, value...)
-// 	}
-// 	response.WriteEntity(sourcesList)
-
-// }
-
-// func (r Resource) deletePipelineRuns(gitRepoURL, namespace, pipeline string) error {
-// 	logging.Log.Debugf("Looking for PipelineRuns in namespace %s with repository URL %s for pipeline %s", namespace, gitRepoURL, pipeline)
-
-// 	allPipelineRuns, err := r.TektonClient.TektonV1alpha1().PipelineRuns(namespace).List(metav1.ListOptions{})
-
-// 	if err != nil {
-// 		logging.Log.Errorf("Unable to retrieve PipelineRuns in the namespace %s! Error: %s", namespace, err.Error())
-// 		return err
-// 	}
-
-// 	found := false
-// 	for _, pipelineRun := range allPipelineRuns.Items {
-// 		if pipelineRun.Spec.PipelineRef.Name == pipeline {
-// 			labels := pipelineRun.GetLabels()
-// 			serverURL := labels["gitServer"]
-// 			orgName := labels["gitOrg"]
-// 			repoName := labels["gitRepo"]
-// 			foundRepoURL := fmt.Sprintf("https://%s/%s/%s", serverURL, orgName, repoName)
-
-// 			gitRepoURL = strings.ToLower(strings.TrimSuffix(gitRepoURL, ".git"))
-// 			foundRepoURL = strings.ToLower(strings.TrimSuffix(foundRepoURL, ".git"))
-
-// 			if foundRepoURL == gitRepoURL {
-// 				found = true
-// 				err := r.TektonClient.TektonV1alpha1().PipelineRuns(namespace).Delete(pipelineRun.Name, &metav1.DeleteOptions{})
-// 				if err != nil {
-// 					logging.Log.Errorf("failed to delete %s, error: %s", pipelineRun.Name, err.Error())
-// 					return err
-// 				}
-// 				logging.Log.Infof("Deleted PipelineRun %s", pipelineRun.Name)
-// 			}
-// 		}
-// 	}
-// 	if !found {
-// 		logging.Log.Infof("No matching PipelineRuns found")
-// 	}
-// 	return nil
-// }
-
-// // Retrieve webhook entry from configmap for the GitHub URL
-// func (r Resource) getGitHubWebhooksFromConfigMap(gitURL *url.URL) ([]webhook, error) {
-// 	if gitURL == nil {
-// 		err := xerrors.New("Invalid URL")
-// 		return nil, err
-// 	}
-// 	logging.Log.Debugf("Getting GitHub webhooks for repository URL %s", gitURL)
-
-// 	sources, err := r.readGitHubWebhooksFromConfigMap()
-// 	if err != nil {
-// 		return []webhook{}, err
-// 	}
-// 	gitRepoURL = strings.ToLower(strings.TrimSuffix(gitRepoURL, ".git"))
-// 	if sources[gitRepoURL] != nil {
-// 		return sources[gitRepoURL], nil
-// 	}
-
-// 	return []webhook{}, fmt.Errorf("could not find webhook with GitRepositoryURL: %s", gitRepoURL)
-
-// }
-
-// // getGitHubWebhooksConfigMap returns the ConfigMap which stores information for
-// // GitHub webhooks
-// func (r Resource) getGitHubWebhooksConfigMap() (*corev1.ConfigMap, error) {
-// 	return r.K8sClient.CoreV1().ConfigMaps(r.Defaults.Namespace).Get(ConfigMapName, metav1.GetOptions{})
-// }
-
-// func (r Resource) writeGitHubWebhooks(sources map[string][]webhook) error {
-// 	logging.Log.Debugf("In writeGitHubWebhooks")
-// 	configMapClient := r.K8sClient.CoreV1().ConfigMaps(r.Defaults.Namespace)
-// 	configMap, err := configMapClient.Get(ConfigMapName, metav1.GetOptions{})
-// 	var create = false
-// 	if err != nil {
-// 		configMap = &corev1.ConfigMap{
-// 			ObjectMeta: metav1.ObjectMeta{
-// 				Name:      ConfigMapName,
-// 				Namespace: r.Defaults.Namespace,
-// 			},
-// 		}
-// 		configMap.BinaryData = make(map[string][]byte)
-// 		create = true
-// 	}
-// 	buf, err := json.Marshal(sources)
-// 	if err != nil {
-// 		logging.Log.Errorf("error marshalling GitHub webhooks: %s.", err.Error())
-// 		return err
-// 	}
-// 	configMap.BinaryData["GitHubSource"] = buf
-// 	if create {
-// 		_, err = configMapClient.Create(configMap)
-// 		if err != nil {
-// 			logging.Log.Errorf("error creating configmap for GitHub webhooks: %s.", err.Error())
-// 			return err
-// 		}
-// 	} else {
-// 		_, err = configMapClient.Update(configMap)
-// 		if err != nil {
-// 			logging.Log.Errorf("error updating configmap for GitHub webhooks: %s.", err.Error())
-// 		}
-// 	}
-// 	return nil
-// }
-
-// func (r Resource) getDefaults(request *restful.Request, response *restful.Response) {
-// 	logging.Log.Debugf("getDefaults returning: %v", r.Defaults)
-// 	response.WriteEntity(r.Defaults)
-// }
-
-// func (r Resource) createOpenshiftRoute() (*routev1.Route, error) {
-// 	return r.RoutesClient.RouteV1().Routes(r.Defaults.Namespace).Create(
-// 		&routev1.Route{},
-// 	)
-// }
-
-// func (r Resource) deleteOpenshiftRoute() (*routev1.Route, error) {
-// 	return r.RoutesClient.RouteV1().Routes(r.Defaults.Namespace).Delete(
-// 		&routev1.Route{},
-// 	)
-// }

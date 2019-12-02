@@ -17,7 +17,7 @@ const (
 )
 
 // New registers endpoints and returns an http.Handler
-func New(cg client.Group) http.Handler {
+func New(cg *client.Group) http.Handler {
 	wsContainer := restful.NewContainer()
 	registerWeb(wsContainer)
 	registerExtensionWebService(wsContainer, cg)
@@ -52,18 +52,18 @@ func registerExtensionWebService(container *restful.Container, cg *client.Group)
 		Produces(restful.MIME_JSON, restful.MIME_JSON)
 
 	// /webhooks/
-	ws.Route(ws.POST("/").To(routeFunctionWithClientGroup(endpoints.CreateWebhook)))
-	ws.Route(ws.GET("/").To(routeFunctionWithClientGroup(endpoints.GetAllWebhooks)))
+	ws.Route(ws.POST("/").To(routeFunctionWithClientGroup(cg, endpoints.CreateWebhook)))
+	ws.Route(ws.GET("/").To(routeFunctionWithClientGroup(cg, endpoints.GetAllWebhooks)))
 
 	// /webhooks/{name}
-	ws.Route(ws.DELETE("/{name}").To(routeFunctionWithClientGroup(endpoints.DeleteWebhook)))
+	ws.Route(ws.DELETE("/{name}").To(routeFunctionWithClientGroup(cg, endpoints.DeleteWebhook)))
 
 	// /webhooks/credentials
-	ws.Route(ws.POST("/credentials").To(routeFunctionWithClientGroup(endpoints.CreateCredential)))
-	ws.Route(ws.GET("/credentials").To(routeFunctionWithClientGroup(endpoints.GetAllCredentials)))
+	ws.Route(ws.POST("/credentials").To(routeFunctionWithClientGroup(cg, endpoints.CreateCredential)))
+	ws.Route(ws.GET("/credentials").To(routeFunctionWithClientGroup(cg, endpoints.GetAllCredentials)))
 
 	// /webhooks/credentials/{name}
-	ws.Route(ws.DELETE("/credentials/{name}").To(routeFunctionWithClientGroup(endpoints.DeleteCredential)))
+	ws.Route(ws.DELETE("/credentials/{name}").To(routeFunctionWithClientGroup(cg, endpoints.DeleteCredential)))
 
 	container.Add(ws)
 }

@@ -25,7 +25,6 @@ import (
 	"net/http"
 
 	"github.com/google/go-cmp/cmp"
-	. "github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/models"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/testutils"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/utils"

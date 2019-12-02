@@ -1,6 +1,10 @@
 package models
 
-import "golang.org/x/xerrors"
+import (
+	"strings"
+
+	"golang.org/x/xerrors"
+)
 
 // Webhook contains only the form payload structure used to create a webhook.
 // This is defined within /src/components/WebhookCreate/WebhookCreate.js
@@ -24,11 +28,24 @@ type Webhook struct {
 	GitRepositoryURL string `json:"gitrepositoryurl"`
 }
 
-// Validate validates the credentialRequest. If there are any empty values, an
-// error is returned
-func (w *Webhook) Validate() error {
-	if w.Name == "" {
+// ValidateWebhookName validates a webhook name
+func ValidateWebhookName(name string) error {
+	if len(name) == 0 {
 		return xerrors.New("Name must cannot be empty")
+	}
+	if len(name) > 57 {
+		return xerrors.New("Name must be less than 58 characters")
+	}
+	if strings.Contains(name, "-") {
+		return xerrors.New("Name may not contains hyphens")
+	}
+	return nil
+}
+
+// Validate validates the webhook.
+func (w *Webhook) Validate() error {
+	if err := ValidateWebhookName(w.Name); err != nil {
+		return err
 	}
 	if w.Namespace == "" {
 		return xerrors.New("Namespace cannot be empty")
@@ -38,6 +55,9 @@ func (w *Webhook) Validate() error {
 	}
 	if w.AccessTokenRef == "" {
 		return xerrors.New("AccessTokenRef cannot be empty")
+	}
+	if w.Pipeline == "" {
+		return xerrors.New("Pipeline cannot be empty")
 	}
 	if w.DockerRegistry == "" {
 		return xerrors.New("Docker Registry cannot be empty")

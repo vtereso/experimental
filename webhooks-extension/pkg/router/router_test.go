@@ -138,9 +138,10 @@ func Test_routeFunctionWithClientGroup(t *testing.T) {
 		resp.WriteHeader(http.StatusNoContent)
 	}
 	routeFunction := routeFunctionWithClientGroup(fakeclient.DummyGroup(), redirect)
-	response := restful.NewResponse()
-	routeFunction(restful.NewRequest(), response)
-	if diff := cmp.Diff(http.StatusNoContent, response.StatusCode); diff != "" {
+	response := restful.NewResponse(httptest.NewRecorder())
+	request := restful.NewRequest(httptest.NewRequest(http.MethodGet, "/", nil))
+	routeFunction(request, response)
+	if diff := cmp.Diff(http.StatusNoContent, response.StatusCode()); diff != "" {
 		t.Fatalf("Status code mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -9,8 +9,8 @@ import (
 )
 
 // DummyGroup returns a group using fake clients and defaults
-func DummyGroup() client.Group {
-	return client.Group{
+func DummyGroup() *client.Group {
+	return &client.Group{
 		K8sClient:      dummyK8sClientset(),
 		TektonClient:   dummyTektonClientset(),
 		TriggersClient: dummyTriggersClientset(),
