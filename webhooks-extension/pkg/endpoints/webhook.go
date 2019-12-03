@@ -67,6 +67,7 @@ const (
 	// eventListenerSA is the name of the serviceAccount that should the
 	// EventListener (eventListenerName) should be configured with
 	eventListenerSA = "tekton-webhooks-extension-eventlistener"
+
 	// triggerTemplatePostfix is the additional name postfix for a
 	// TriggerTemplate. The webhook pipeline name is used for the base
 	triggerTemplatePostfix = "template"
@@ -79,24 +80,36 @@ const (
 	// monitorTriggerBindingPostfix is the additional name postfix for a
 	// TriggerBinding. The webhook pipeline name is used for the base
 	monitorTriggerBindingPostfix = "binding"
+
+	// wextMonitorSecretName is the name of the EventListenerTrigger parameter
+	// for the secret being used by the monitor within a TriggerTemplate
+	wextMonitorSecretName = "gitsecretname"
+	// wextMonitorSecretKey is the name of the EventListenerTrigger parameter
+	// for the secret being used by the monitor within a TriggerTemplate
+	wextMonitorSecretKey = "gitsecretkeyname"
+	// wextMonitorDashboardURL is the name of the EventListenerTrigger parameter
+	// for the dashboard url used by the monitor within a TriggerTemplate
+	wextMonitorDashboardURL = "dashboardurl"
+
 	// wextTargetNamespace is the name of the EventListenerTrigger parameter for
 	// the namespace used within a TriggerTemplate
 	wextTargetNamespace = "Wext-Target-Namespace"
-	// hookServiceAccount is the name of the EventListenerTrigger parameter for
+	// wextServiceAccount is the name of the EventListenerTrigger parameter for
 	// the service account used within a TriggerTemplate
 	wextServiceAccount = "Wext-Service-Account"
-	// hookDockerRegistry is the name of the EventListenerTrigger parameter for
+	// wextDockerRegistry is the name of the EventListenerTrigger parameter for
 	// the docker registry used within a TriggerTemplate
 	wextDockerRegistry = "Wext-Docker-Registry"
-	// hookGitServer is the name of the EventListenerTrigger parameter for
+	// wextGitServer is the name of the EventListenerTrigger parameter for
 	// the git server used within a TriggerTemplate
 	wextGitServer = "Wext-Git-server"
-	// hookGitOrg is the name of the EventListenerTrigger parameter for
+	// wextGitOrg is the name of the EventListenerTrigger parameter for
 	// the git organization used within a TriggerTemplate
 	wextGitOrg = "Wext-Git-Org"
-	// hookGitRepo is the name of the EventListenerTrigger parameter for
+	// wextGitRepo is the name of the EventListenerTrigger parameter for
 	// the git repo used within a TriggerTemplate
 	wextGitRepo = "Wext-Git-Repo"
+
 	// WextInterceptorTriggerName is the name of the EventListenerTrigger
 	// Interceptor parameter used by the Webhook extension interceptor
 	WextInterceptorTriggerName = "Wext-Trigger-Name"
@@ -109,6 +122,9 @@ const (
 	// WextInterceptorSecretName is the name of the EventListenerTrigger
 	// Interceptor parameter used by the Webhook extension interceptor
 	WextInterceptorSecretName = "Wext-Secret-Name"
+	// wextValidator is the name of the Webhook extension interceptor
+	wextValidator = "tekton-webhooks-extension-validator"
+
 	// pipelineRunServerName is the label key applied to PipelineRuns for
 	// the git server
 	pipelineRunServerName = "webhooks.tekton.dev/gitServer"
@@ -227,7 +243,7 @@ func CreateWebhook(request *restful.Request, response *restful.Response, cg *cli
 		if strings.Contains(strings.ToLower(cg.Defaults.Platform), "openshift") {
 			if err := createOpenshiftRoute(cg, el.Status.Configuration.GeneratedResourceName); err != nil {
 				logging.Log.Debug("Failed to create Route, deleting EventListener...")
-				if err = deleteEventListener(cg, eventListenerName); err != nil {
+				if err = deleteEventListener(cg); err != nil {
 					logging.Log.Debug("Failed to delete EventListener")
 				}
 				utils.RespondError(response, xerrors.New("Failed to create Route for webhook"), http.StatusInternalServerError)
@@ -236,7 +252,7 @@ func CreateWebhook(request *restful.Request, response *restful.Response, cg *cli
 		} else {
 			if err := createIngress(cg, el.Status.Configuration.GeneratedResourceName); err != nil {
 				logging.Log.Debug("Failed to create Ingress, deleting EventListener...")
-				if err = deleteEventListener(cg, eventListenerName); err != nil {
+				if err = deleteEventListener(cg); err != nil {
 					logging.Log.Debug("Failed to delete EventListener")
 				}
 				utils.RespondError(response, xerrors.New("Failed to create Ingress for webhook"), http.StatusInternalServerError)
@@ -326,7 +342,7 @@ func DeleteWebhook(request *restful.Request, response *restful.Response, cg *cli
 	switch len(el.Spec.Triggers) {
 	// The EventListener cannot have no Triggers or it will fail validation
 	case 0:
-		if err := deleteEventListener(cg, el.Name); err != nil {
+		if err := deleteEventListener(cg); err != nil {
 			utils.RespondError(response, err, http.StatusInternalServerError)
 			return
 		}
@@ -454,7 +470,8 @@ func deleteIngress(cg *client.Group, ingressName string) error {
 }
 
 // addWebhookTriggers updates the EventListener with additional triggers
-// generated by the webhook. The created EventListenerTriggers have names in the
+// generated by the webhook. The webhook git URL is assumed to be a valid
+// url. The created EventListenerTriggers have names in the
 // form: `<webhookName>-<postfix>`. This change is only made in memory and needs
 // to be persisted
 func addWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhook models.Webhook) {
@@ -502,7 +519,7 @@ func addWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventL
 func removeWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhookName string) {
 	newTriggers := []triggersv1alpha1.EventListenerTrigger{}
 	for _, trigger := range eventListener.Spec.Triggers {
-		if getWebhookNameFromTrigger(trigger) != webhookName {
+		if isWebhookTrigger(trigger) && getWebhookNameFromTrigger(trigger) != webhookName {
 			newTriggers = append(newTriggers, trigger)
 		}
 	}
@@ -531,7 +548,7 @@ func newTrigger(triggerName, bindingName, templateName, interceptorNamespace, re
 			ObjectRef: &corev1.ObjectReference{
 				APIVersion: "v1",
 				Kind:       "Service",
-				Name:       "tekton-webhooks-extension-validator",
+				Name:       wextValidator,
 				Namespace:  interceptorNamespace,
 			},
 		},
@@ -541,37 +558,68 @@ func newTrigger(triggerName, bindingName, templateName, interceptorNamespace, re
 // getMonitorTriggerParams returns parameters to be used by the monitor trigger
 func getMonitorTriggerParams(cg *client.Group, w models.Webhook) []pipelinesv1alpha1.Param {
 	return []pipelinesv1alpha1.Param{
-		{Name: "gitsecretname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.AccessTokenRef}},
-		{Name: "gitsecretkeyname", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: accessToken}},
-		{Name: "dashboardurl", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: getDashboardURL(cg)}},
+		{Name: wextMonitorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.AccessTokenRef}},
+		{Name: wextMonitorSecretKey, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: AccessToken}},
+		{Name: wextMonitorDashboardURL, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: getDashboardURL(cg)}},
 	}
 }
 
 // getPipelineTriggerParams returns parameters according to the specified
 // webhook for the pipeline trigger
 func getPipelineTriggerParams(w models.Webhook) []pipelinesv1alpha1.Param {
+	url, _ := sanitizeGitURL(w.GitRepositoryURL)
+	server, org, repo := getGitValues(*url)
 	return []pipelinesv1alpha1.Param{
-		{Name: "webhooks-tekton-target-namespace", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.Namespace}},
-		{Name: "webhooks-tekton-service-account", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.ServiceAccount}},
-		{Name: "webhooks-tekton-git-server", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "server"}},
-		{Name: "webhooks-tekton-git-org", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "org"}},
-		{Name: "webhooks-tekton-git-repo", Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repo"}},
+		{Name: wextTargetNamespace, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.Namespace}},
+		{Name: wextServiceAccount, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.ServiceAccount}},
+		{Name: wextDockerRegistry, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.DockerRegistry}},
+		{Name: wextGitServer, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: server}},
+		{Name: wextGitOrg, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: org}},
+		{Name: wextGitRepo, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: repo}},
 	}
 }
 
-// triggerToWebhook attempts to convert an EventListenerTrigger into a Webhook
+// triggerToWebhook converts a webhook EventListenerTrigger into a Webhook
 func triggerToWebhook(t triggersv1alpha1.EventListenerTrigger) (*models.Webhook, error) {
-	if err := checkTrigger(t); err != nil {
-		return nil, err
+	expectedParams := map[string]string{
+		wextTargetNamespace: "",
+		wextServiceAccount:  "",
+		wextDockerRegistry:  "",
+	}
+	expectedInterceptorParams := map[string]string{
+		WextInterceptorSecretName: "",
+		WextInterceptorRepoURL:    "",
+	}
+	// Find expected parameters
+	for _, param := range t.Params {
+		if _, ok := expectedParams[param.Name]; ok {
+			expectedParams[param.Name] = param.Value.StringVal
+		}
+	}
+	for _, param := range t.Interceptor.Header {
+		if _, ok := expectedInterceptorParams[param.Name]; ok {
+			expectedInterceptorParams[param.Name] = param.Value.StringVal
+		}
+	}
+	// Check for any empty values
+	for _, expectMap := range []map[string]string{
+		expectedParams,
+		expectedInterceptorParams,
+	} {
+		for key, val := range expectMap {
+			if val == "" {
+				return nil, xerrors.Errorf("%s was not found", key)
+			}
+		}
 	}
 	w := &models.Webhook{
-		Name:             t.Params[0].Value.StringVal,
-		Namespace:        t.Params[1].Value.StringVal,
-		ServiceAccount:   t.Params[2].Value.StringVal,
-		DockerRegistry:   t.Params[3].Value.StringVal,
-		AccessTokenRef:   t.Interceptor.Header[3].Value.StringVal,
-		Pipeline:         getWebhookNameFromTrigger(t),
-		GitRepositoryURL: t.Interceptor.Header[2].Value.StringVal,
+		Name:             getWebhookNameFromTrigger(t),
+		Namespace:        expectedParams[wextTargetNamespace],
+		ServiceAccount:   expectedParams[wextServiceAccount],
+		DockerRegistry:   expectedParams[wextDockerRegistry],
+		AccessTokenRef:   expectedInterceptorParams[WextInterceptorSecretName],
+		Pipeline:         getPipelineNameFromTrigger(t),
+		GitRepositoryURL: expectedInterceptorParams[WextInterceptorRepoURL],
 	}
 	return w, nil
 }
@@ -597,9 +645,31 @@ func findWebhookByName(webhooks []models.Webhook, name string) (*models.Webhook,
 	return nil, xerrors.New("Webhook not found")
 }
 
-// getWebhookNameFromTrigger gets the name of a webhook given a Trigger
+// isWebhookTrigger returns whether or not the Trigger is a webhook Trigger by
+// checking for the existance of the existance of the extension validator
+// interceptor
+func isWebhookTrigger(t triggersv1alpha1.EventListenerTrigger) bool {
+	if t.Interceptor == nil {
+		return false
+	}
+	if t.Interceptor.ObjectRef == nil {
+		return false
+	}
+	return (t.Interceptor.ObjectRef.Name == wextValidator)
+}
+
+// getWebhookNameFromTrigger gets the name of a webhook given a
+// Trigger. The trigger is assumed to be a valid webhook trigger
 func getWebhookNameFromTrigger(t triggersv1alpha1.EventListenerTrigger) string {
-	return strings.TrimSuffix(t.Template.Name, fmt.Sprintf("-%s", triggerTemplatePostfix))
+	delimiterIndex := strings.Index(t.Name, "-")
+	return t.Name[:delimiterIndex]
+}
+
+// getPipelineNameFromTrigger gets the name of a pipeline given a
+// Trigger. The trigger is assumed to be a valid webhook trigger
+func getPipelineNameFromTrigger(t triggersv1alpha1.EventListenerTrigger) string {
+	delimiterIndex := strings.Index(t.Template.Name, "-")
+	return t.Template.Name[:delimiterIndex]
 }
 
 // getBaseEventListener returns the base EventListener. Triggers must be added
@@ -634,8 +704,8 @@ func updateEventListener(cg *client.Group, el *triggersv1alpha1.EventListener) e
 }
 
 // deleteEventListener attempts to delete the EventListener
-func deleteEventListener(cg *client.Group, elName string) error {
-	return cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Delete(elName, &metav1.DeleteOptions{})
+func deleteEventListener(cg *client.Group) error {
+	return cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Delete(eventListenerName, &metav1.DeleteOptions{})
 }
 
 // getWebhooksFromEventListener returns all the webhooks on the EventListener.
@@ -645,19 +715,14 @@ func getWebhooksFromEventListener(el triggersv1alpha1.EventListener) []models.We
 	logging.Log.Info("Getting webhooks from eventlistener")
 	hooks := []models.Webhook{}
 	for _, trigger := range el.Spec.Triggers {
-		if strings.HasSuffix(trigger.Name, pullTriggerBindingPostfix) {
+		if isWebhookTrigger(trigger) && strings.HasSuffix(trigger.Name, pullTriggerBindingPostfix) {
 			if hook, err := triggerToWebhook(trigger); err != nil {
+				logging.Log.Debug(err)
 				hooks = append(hooks, *hook)
 			}
 		}
 	}
 	return hooks
-}
-
-// checkTrigger returns an error if the Trigger is not formatted as expected
-func checkTrigger(t triggersv1alpha1.EventListenerTrigger) error {
-	// TODO
-	return nil
 }
 
 // waitForEventListenerStatus polls the created webhook EventListener until the
@@ -684,16 +749,22 @@ func getGitValues(u url.URL) (server, org, repo string) {
 	return u.Host, u.Path[1:lastIndex], u.Path[lastIndex+1:]
 }
 
-// getWebhookSecretTokens returns the secretToken and accessToken stored in the
-// Secret
-func getWebhookSecretTokens(cg *client.Group, secretName string) (accessToken string, secretToken string, err error) {
+// getWebhookSecretTokens attempts to return the accessToken and secretToken
+// stored in the Secret
+func getWebhookSecretTokens(cg *client.Group, secretName string) (aToken string, sToken string, err error) {
 	secret, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Get(secretName, metav1.GetOptions{})
 	if err != nil {
 		return "", "", xerrors.Errorf("Error getting Webhook secret. Error was: %w", err)
 	}
-	accessToken = string(secret.Data[accessToken])
-	secretToken = string(secret.Data[secretToken])
-	return accessToken, secretToken, nil
+	accessToken, ok := secret.Data[AccessToken]
+	if !ok {
+		return "", "", xerrors.New("Did not find access token")
+	}
+	secretToken, ok := secret.Data[SecretToken]
+	if !ok {
+		return "", "", xerrors.New("Did not find secret token")
+	}
+	return string(accessToken), string(secretToken), nil
 }
 
 // sanitizeGitURL returns a URL for the specified rawurl string, where
@@ -704,10 +775,12 @@ func sanitizeGitURL(rawurl string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !strings.HasSuffix(url.Hostname(), ".com") {
+	if !strings.HasSuffix(url.Hostname(), ".com") ||
+		len(url.Hostname()) == 0 ||
+		strings.HasPrefix(url.Hostname(), ".") {
 		return nil, xerrors.Errorf("URL hostname '%s' is invalid", url.Hostname())
 	}
-	if url.Scheme != "http" || url.Scheme != "https" {
+	if !(url.Scheme == "http" || url.Scheme == "https") {
 		return nil, xerrors.Errorf("URL scheme '%s' is invalid", url.Scheme)
 	}
 	// Does not allow trailing slashes

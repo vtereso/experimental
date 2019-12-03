@@ -32,12 +32,12 @@ import (
 var src = rand.NewSource(time.Now().UnixNano())
 
 const (
-	// accessToken is a key within a K8s secret Data field. This value of this
+	// AccessToken is a key within a K8s secret Data field. This value of this
 	// key should be a git access token
-	accessToken = "accessToken"
+	AccessToken = "accessToken"
 	// SecretToken is a key within a K8s secret Data field. This value of this
 	// key should be used to validate payloads (e.g. webhooks).
-	secretToken = "secretToken"
+	SecretToken = "secretToken"
 )
 
 // CreateCredential creates a secret of type access token, which should store
@@ -128,8 +128,8 @@ func credentialRequestToSecret(cred models.CredentialRequest, namespace string) 
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			accessToken: []byte(cred.AccessToken),
-			secretToken: utils.GetRandomToken(src),
+			AccessToken: []byte(cred.AccessToken),
+			SecretToken: utils.GetRandomToken(src),
 		},
 	}
 }
@@ -139,14 +139,14 @@ func secretToCredentialResponse(s corev1.Secret) models.CredentialResponse {
 	return models.CredentialResponse{
 		CredentialRequest: models.CredentialRequest{
 			Name:        s.Name,
-			AccessToken: string(s.Data[accessToken]),
+			AccessToken: string(s.Data[AccessToken]),
 		},
-		SecretToken: string(s.Data[secretToken]),
+		SecretToken: string(s.Data[SecretToken]),
 	}
 }
 
 // isCredential returns whether the specified secret is a credential. This is a
 // simple check against whether the specified keys exist.
 func isCredential(secret corev1.Secret) bool {
-	return secret.Data[accessToken] != nil && secret.Data[secretToken] != nil
+	return secret.Data[AccessToken] != nil && secret.Data[SecretToken] != nil
 }
