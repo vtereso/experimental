@@ -21,7 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	routesv1 "github.com/openshift/api/route/v1"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/client/fake"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints/testutils"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/models"
 	pipelinesv1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	triggersv1alpha1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
@@ -66,7 +66,7 @@ func Test_createOpenshiftRoute(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			var hasErr bool
 			if err := createOpenshiftRoute(cg, tests[i].serviceName); err != nil {
 				hasErr = true
@@ -96,7 +96,7 @@ func Test_deleteOpenshiftRoute(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			// Seed route for deletion
 			route := &routesv1.Route{
 				ObjectMeta: metav1.ObjectMeta{
@@ -463,7 +463,7 @@ func Test_getWebhookEventListener(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			if tests[i].seedEventListener != nil {
 				_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Create(tests[i].seedEventListener)
 				if err != nil {
@@ -499,7 +499,7 @@ func Test_createEventListener(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			var hasErr bool
 			if err := createEventListener(cg, tests[i].eventListener); err != nil {
 				hasErr = true
@@ -529,7 +529,7 @@ func Test_updateEventListener(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Update(tests[i].eventListener)
 			if err != nil {
 				t.Fatal(err)
@@ -570,7 +570,7 @@ func Test_deleteEventListener(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			if tests[i].seedEventListener != nil {
 				_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Create(tests[i].seedEventListener)
 				if err != nil {
@@ -633,7 +633,7 @@ func Test_getWebhooksFromEventListener(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			el := getBaseEventListener(cg.Defaults.Namespace)
 			t.Log("Trigger spec:", el.Spec.Triggers)
 			for _, webhook := range tests[i].webhooks {
@@ -685,7 +685,7 @@ func Test_waitForEventListenerStatus(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			if tests[i].seedEventListener != nil {
 				// Simulate async update to the EventListener status
 				if tests[i].seedEventListener.Status.Configuration.GeneratedResourceName == "" {
@@ -831,7 +831,7 @@ func Test_getWebhookSecretTokens(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			if tests[i].seedSecret != nil {
 				_, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Create(tests[i].seedSecret)
 				if err != nil {
@@ -992,7 +992,7 @@ func Test_getDashboardURL(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := fake.DummyGroup()
+			cg := testutils.DummyGroup()
 			cg.Defaults.Platform = tests[i].seedPlatform
 			if tests[i].seedService != nil {
 				_, err := cg.K8sClient.CoreV1().Services(cg.Defaults.Namespace).Create(tests[i].seedService)

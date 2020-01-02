@@ -1,12 +1,10 @@
-package router
+package endpoints
 
 import (
 	"net/http"
 	"os"
 
 	restful "github.com/emicklei/go-restful"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
 )
 
@@ -16,8 +14,8 @@ const (
 	webDirEnvKey = "WEB_RESOURCES_DIR"
 )
 
-// New registers endpoints and returns an http.Handler
-func New(cg *client.Group) http.Handler {
+// NewRouter registers endpoints and returns an http.Handler
+func NewRouter(cg *Group) http.Handler {
 	wsContainer := restful.NewContainer()
 	registerWeb(wsContainer)
 	registerExtensionWebService(wsContainer, cg)
@@ -30,7 +28,7 @@ func New(cg *client.Group) http.Handler {
 func registerLivenessWebService(container *restful.Container) {
 	ws := new(restful.WebService)
 	ws.Path("/liveness")
-	ws.Route(ws.GET("/").To(endpoints.CheckHealth))
+	ws.Route(ws.GET("/").To(CheckHealth))
 	container.Add(ws)
 }
 
@@ -38,13 +36,13 @@ func registerLivenessWebService(container *restful.Container) {
 func registerReadinessWebService(container *restful.Container) {
 	ws := new(restful.WebService)
 	ws.Path("/readiness")
-	ws.Route(ws.GET("/").To(endpoints.CheckHealth))
+	ws.Route(ws.GET("/").To(CheckHealth))
 	container.Add(ws)
 }
 
 // registerExtensionWebService registers the webhook webservice, which consumes
 // and produces JSON
-func registerExtensionWebService(container *restful.Container, cg *client.Group) {
+func registerExtensionWebService(container *restful.Container, cg *Group) {
 	ws := new(restful.WebService)
 	ws.
 		Path("/webhooks").
@@ -52,18 +50,18 @@ func registerExtensionWebService(container *restful.Container, cg *client.Group)
 		Produces(restful.MIME_JSON, restful.MIME_JSON)
 
 	// /webhooks/
-	ws.Route(ws.POST("/").To(routeFunctionWithClientGroup(cg, endpoints.CreateWebhook)))
-	ws.Route(ws.GET("/").To(routeFunctionWithClientGroup(cg, endpoints.GetAllWebhooks)))
+	ws.Route(ws.POST("/").To(cg.CreateWebhook))
+	ws.Route(ws.GET("/").To(cg.GetAllWebhooks))
 
 	// /webhooks/{name}
-	ws.Route(ws.DELETE("/{name}").To(routeFunctionWithClientGroup(cg, endpoints.DeleteWebhook)))
+	ws.Route(ws.DELETE("/{name}").To(cg.DeleteWebhook))
 
 	// /webhooks/credentials
-	ws.Route(ws.POST("/credentials").To(routeFunctionWithClientGroup(cg, endpoints.CreateCredential)))
-	ws.Route(ws.GET("/credentials").To(routeFunctionWithClientGroup(cg, endpoints.GetAllCredentials)))
+	ws.Route(ws.POST("/credentials").To(cg.CreateCredential))
+	ws.Route(ws.GET("/credentials").To(cg.GetAllCredentials))
 
 	// /webhooks/credentials/{name}
-	ws.Route(ws.DELETE("/credentials/{name}").To(routeFunctionWithClientGroup(cg, endpoints.DeleteCredential)))
+	ws.Route(ws.DELETE("/credentials/{name}").To(cg.DeleteCredential))
 
 	container.Add(ws)
 }
@@ -78,12 +76,4 @@ func registerWeb(container *restful.Container) {
 	logging.Log.Infof("Serving from web bundle from %s", webResourcesDir)
 	handler = http.FileServer(http.Dir(webResourcesDir))
 	container.Handle("/web/", http.StripPrefix("/web/", handler))
-}
-
-// routeFunctionClientGroup returns a RouteFunction that redirects to a
-// RouteFunction with an additional client group parameter
-func routeFunctionWithClientGroup(cg *client.Group, redirect func(*restful.Request, *restful.Response, *client.Group)) restful.RouteFunction {
-	return func(req *restful.Request, resp *restful.Response) {
-		redirect(req, resp, cg)
-	}
 }

@@ -27,10 +27,9 @@ import (
 
 	restful "github.com/emicklei/go-restful"
 	routesv1 "github.com/openshift/api/route/v1"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints/utils"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/models"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/utils"
 	githook "github.com/tektoncd/experimental/webhooks-extension/pkg/webhook"
 	pipelinesv1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	triggersv1alpha1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
@@ -138,7 +137,7 @@ const (
 
 // CreateWebhook creates a webhook for a given repository and creates/updates
 // the EventListener
-func CreateWebhook(request *restful.Request, response *restful.Response, cg *client.Group) {
+func (cg *Group) CreateWebhook(request *restful.Request, response *restful.Response) {
 	logging.Log.Debug("CreateWebhook()")
 	eventListenerLock.Lock()
 	defer eventListenerLock.Unlock()
@@ -265,7 +264,7 @@ func CreateWebhook(request *restful.Request, response *restful.Response, cg *cli
 
 // DeleteWebhook attempts to remove a webhook and the corresponding triggers on
 // the EventListener
-func DeleteWebhook(request *restful.Request, response *restful.Response, cg *client.Group) {
+func (cg *Group) DeleteWebhook(request *restful.Request, response *restful.Response) {
 	logging.Log.Debug("DeleteWebhook()")
 	eventListenerLock.Lock()
 	defer eventListenerLock.Unlock()
@@ -363,7 +362,7 @@ func DeleteWebhook(request *restful.Request, response *restful.Response, cg *cli
 }
 
 // GetAllWebhooks returns all of the webhooks triggers on the EventListener
-func GetAllWebhooks(request *restful.Request, response *restful.Response, cg *client.Group) {
+func (cg *Group) GetAllWebhooks(request *restful.Request, response *restful.Response) {
 	logging.Log.Debugf("GetAllWebhooks()")
 	el, err := getWebhookEventListener(cg)
 	if err != nil {
@@ -376,7 +375,7 @@ func GetAllWebhooks(request *restful.Request, response *restful.Response, cg *cl
 
 // deletePipelineRuns deletes PipelineRuns witin the specified namespace that
 // have a matching PipelineRef and GitURL
-func deletePipelineRuns(cg *client.Group, repoURL *url.URL, namespace, pipeline string) error {
+func deletePipelineRuns(cg *Group, repoURL *url.URL, namespace, pipeline string) error {
 	logging.Log.Debugf("deletePipelineRuns() repo: %s, namespace: %s, pipeline: %b", repoURL.String(), namespace, pipeline)
 	labelSelector := fields.SelectorFromSet(makePipelineRunSelectorSet(repoURL)).String()
 	pipelineRunList, err := cg.TektonClient.TektonV1alpha1().PipelineRuns(namespace).List(metav1.ListOptions{LabelSelector: labelSelector})
@@ -404,7 +403,7 @@ func makePipelineRunSelectorSet(repoURL *url.URL) map[string]string {
 
 // createOpenshiftRoute attempts to create an Openshift Route on the service.
 // The Route has the same name as the service
-func createOpenshiftRoute(cg *client.Group, serviceName string) error {
+func createOpenshiftRoute(cg *Group, serviceName string) error {
 	route := &routesv1.Route{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: serviceName,
@@ -421,13 +420,13 @@ func createOpenshiftRoute(cg *client.Group, serviceName string) error {
 }
 
 // deleteOpenshiftRoute attempts to delete an Openshift Route
-func deleteOpenshiftRoute(cg *client.Group, routeName string) error {
+func deleteOpenshiftRoute(cg *Group, routeName string) error {
 	return cg.RoutesClient.RouteV1().Routes(cg.Defaults.Namespace).Delete(routeName, &metav1.DeleteOptions{})
 }
 
 // createIngress attempts to creates an ingress for the service. The Ingress has
 // the same name as the service
-func createIngress(cg *client.Group, serviceName string) error {
+func createIngress(cg *Group, serviceName string) error {
 	// Unlike webhook creation, the ingress does not need a protocol specified
 	callback := strings.TrimPrefix(cg.Defaults.CallbackURL, "http://")
 	callback = strings.TrimPrefix(callback, "https://")
@@ -465,7 +464,7 @@ func createIngress(cg *client.Group, serviceName string) error {
 }
 
 // deleteIngress attempts to deletes the ingress
-func deleteIngress(cg *client.Group, ingressName string) error {
+func deleteIngress(cg *Group, ingressName string) error {
 	return cg.K8sClient.ExtensionsV1beta1().Ingresses(cg.Defaults.Namespace).Delete(ingressName, &metav1.DeleteOptions{})
 }
 
@@ -474,7 +473,7 @@ func deleteIngress(cg *client.Group, ingressName string) error {
 // url. The created EventListenerTriggers have names in the
 // form: `<webhookName>-<postfix>`. This change is only made in memory and needs
 // to be persisted
-func addWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhook models.Webhook) {
+func addWebhookTriggers(cg *Group, eventListener *triggersv1alpha1.EventListener, webhook models.Webhook) {
 	pipelineTriggerParams := getPipelineTriggerParams(webhook)
 	monitorTriggerParams := getMonitorTriggerParams(cg, webhook)
 
@@ -516,7 +515,7 @@ func addWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventL
 // removeWebhookTriggers removes the Triggers from the EventListener that match
 // the webhook name. This change is only made in memory and needs to be
 // persisted
-func removeWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhookName string) {
+func removeWebhookTriggers(cg *Group, eventListener *triggersv1alpha1.EventListener, webhookName string) {
 	newTriggers := []triggersv1alpha1.EventListenerTrigger{}
 	for _, trigger := range eventListener.Spec.Triggers {
 		if isWebhookTrigger(trigger) && getWebhookNameFromTrigger(trigger) != webhookName {
@@ -556,7 +555,7 @@ func newTrigger(triggerName, bindingName, templateName, interceptorNamespace, re
 }
 
 // getMonitorTriggerParams returns parameters to be used by the monitor trigger
-func getMonitorTriggerParams(cg *client.Group, w models.Webhook) []pipelinesv1alpha1.Param {
+func getMonitorTriggerParams(cg *Group, w models.Webhook) []pipelinesv1alpha1.Param {
 	return []pipelinesv1alpha1.Param{
 		{Name: wextMonitorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: w.AccessTokenRef}},
 		{Name: wextMonitorSecretKey, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: AccessToken}},
@@ -687,24 +686,24 @@ func getBaseEventListener(installNamespace string) *triggersv1alpha1.EventListen
 }
 
 // getWebhookEventListener returns the singleton EventListener used for webhooks
-func getWebhookEventListener(cg *client.Group) (*triggersv1alpha1.EventListener, error) {
+func getWebhookEventListener(cg *Group) (*triggersv1alpha1.EventListener, error) {
 	return cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
 }
 
 // createEventListener attempts to the create the EventListener
-func createEventListener(cg *client.Group, el *triggersv1alpha1.EventListener) error {
+func createEventListener(cg *Group, el *triggersv1alpha1.EventListener) error {
 	_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Create(el)
 	return err
 }
 
 // updateEventListener attempts to update the EventListener
-func updateEventListener(cg *client.Group, el *triggersv1alpha1.EventListener) error {
+func updateEventListener(cg *Group, el *triggersv1alpha1.EventListener) error {
 	_, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Update(el)
 	return err
 }
 
 // deleteEventListener attempts to delete the EventListener
-func deleteEventListener(cg *client.Group) error {
+func deleteEventListener(cg *Group) error {
 	return cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Delete(eventListenerName, &metav1.DeleteOptions{})
 }
 
@@ -728,7 +727,7 @@ func getWebhooksFromEventListener(el triggersv1alpha1.EventListener) []models.We
 // waitForEventListenerStatus polls the created webhook EventListener until the
 // EventListenerStatus is populated, which ensures the backing service is
 // created.
-func waitForEventListenerStatus(cg *client.Group) (*triggersv1alpha1.EventListener, error) {
+func waitForEventListenerStatus(cg *Group) (*triggersv1alpha1.EventListener, error) {
 	for {
 		el, err := cg.TriggersClient.TektonV1alpha1().EventListeners(cg.Defaults.Namespace).Get(eventListenerName, metav1.GetOptions{})
 		if err != nil {
@@ -751,7 +750,7 @@ func getGitValues(u url.URL) (server, org, repo string) {
 
 // getWebhookSecretTokens attempts to return the accessToken and secretToken
 // stored in the Secret
-func getWebhookSecretTokens(cg *client.Group, secretName string) (aToken string, sToken string, err error) {
+func getWebhookSecretTokens(cg *Group, secretName string) (aToken string, sToken string, err error) {
 	secret, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Get(secretName, metav1.GetOptions{})
 	if err != nil {
 		return "", "", xerrors.Errorf("Error getting Webhook secret. Error was: %w", err)
@@ -793,7 +792,7 @@ func sanitizeGitURL(rawurl string) (*url.URL, error) {
 }
 
 // getDashboardURL gets the URL of the Dashboard
-func getDashboardURL(cg *client.Group) string {
+func getDashboardURL(cg *Group) string {
 	type element struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`

@@ -18,9 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
-	fakeclient "github.com/tektoncd/experimental/webhooks-extension/pkg/client/fake"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/router"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 )
 
 // DummyHTTPRequest reurns a new http with the specified method, url and body.
@@ -32,7 +30,6 @@ func DummyHTTPRequest(method string, url string, body io.Reader) *http.Request {
 }
 
 // DummyServer return a new httptest server and the client group used within
-func DummyServer() (*httptest.Server, *client.Group) {
-	cg := fakeclient.DummyGroup()
-	return httptest.NewServer(router.New(cg)), cg
+func DummyServer(cg *endpoints.Group) *httptest.Server {
+	return httptest.NewServer(endpoints.NewRouter(cg))
 }

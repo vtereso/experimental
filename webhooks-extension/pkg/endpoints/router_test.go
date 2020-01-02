@@ -1,4 +1,4 @@
-package router
+package endpoints
 
 import (
 	"net/http"
@@ -8,8 +8,7 @@ import (
 
 	restful "github.com/emicklei/go-restful"
 	"github.com/google/go-cmp/cmp"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
-	fakeclient "github.com/tektoncd/experimental/webhooks-extension/pkg/client/fake"
+	fakeclient "github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints/testutils"
 )
 
 var (

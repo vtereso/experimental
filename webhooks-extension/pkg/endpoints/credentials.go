@@ -19,10 +19,9 @@ import (
 	"time"
 
 	restful "github.com/emicklei/go-restful"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/client"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints/utils"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/models"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/utils"
 	"golang.org/x/xerrors"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -43,7 +42,7 @@ const (
 // CreateCredential creates a secret of type access token, which should store
 // a Git access token. The created secret also generates a secret string, which
 // should be used to verify against payloads (e.g. webhooks).
-func CreateCredential(request *restful.Request, response *restful.Response, cg *client.Group) {
+func (cg *Group) CreateCredential(request *restful.Request, response *restful.Response) {
 	logging.Log.Debug("In CreateCredential")
 	credReq := models.CredentialRequest{}
 
@@ -69,7 +68,7 @@ func CreateCredential(request *restful.Request, response *restful.Response, cg *
 }
 
 // DeleteCredential deletes the specified credential
-func DeleteCredential(request *restful.Request, response *restful.Response, cg *client.Group) {
+func (cg *Group) DeleteCredential(request *restful.Request, response *restful.Response) {
 	logging.Log.Debug("In DeleteCredential")
 	credName := request.PathParameter("name")
 	if credName == "" {
@@ -96,7 +95,7 @@ func DeleteCredential(request *restful.Request, response *restful.Response, cg *
 
 // GetAllCredentials returns all the credentials specified within the default
 // namespace
-func GetAllCredentials(request *restful.Request, response *restful.Response, cg *client.Group) {
+func (cg *Group) GetAllCredentials(request *restful.Request, response *restful.Response) {
 	// Get secrets from the resource K8sClient
 	secrets, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).List(metav1.ListOptions{})
 	if err != nil {
