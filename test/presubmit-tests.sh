@@ -23,16 +23,21 @@
 
 source $(dirname $0)/../vendor/github.com/tektoncd/plumbing/scripts/presubmit-tests.sh
 
-CHANGED_FILES="$(list_changed_files)"
-
 function run() {
     folder=$1
     header "${folder}"
     shift
     pushd $(dirname $0)/../${folder} || return 1
-    ./test/presubmit-tests.sh $@ || exited=1
+    if [[ -f ./test/presubmit-tests.sh ]]; then
+        ./test/presubmit-tests.sh $@ || exited=1
+    else
+        echo "Skip due to no `./test/presubmit-tests.sh` file"
+    fi
     popd >/dev/null
     return $exited
 }
 
 run webhooks-extension $@ || exit 1
+run catalogs $@ || exit 1
+run octant-plugin $@ || exit 1
+run tekdoc  $@ || exit 1

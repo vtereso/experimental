@@ -17,13 +17,18 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/router"
 )
 
 func main() {
 	logging.Log.Info("Registering all endpoints")
-	h := router.New(r)
+	cg, err := endpoints.NewGroup()
+	if err != nil {
+		logging.Log.Fatal(err)
+	}
+
+	h := endpoints.NewRouter(cg)
 
 	port := ":8080"
 	portnum := os.Getenv("PORT")
