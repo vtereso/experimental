@@ -31,15 +31,91 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-func Test_deletePipelineRuns(t *testing.T) {}
+func Test_deletePipelineRuns(t *testing.T) {
+	tests := []struct {
+		name         string
+		repoURL      *url.URL
+		pipelineName string
+		seed         bool
+		hasErr       bool
+	}{
+		// Correct
+		{
+			name: "Delete PipelineRun",
+			repoURL: &url.URL{
+				Host: "website.com",
+				Path: "/org/repo",
+			},
+			pipelineName: "pipeline",
+			hasErr:       false,
+		},
+		// Incorrect
+		{
+			name: "No PipelineRuns",
+			repoURL: &url.URL{
+				Host: "website.com",
+				Path: "/org/repo",
+			},
+			pipelineName: "pipeline",
+			hasErr:       true,
+		},
+	}
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			cg := DummyGroup()
 
-// func deletePipelineRuns(cg *client.Group, repoURL *url.URL, namespace, pipeline string) error {
-// }
+			if tests[i].seed {
+				plr := &pipelinesv1alpha1.PipelineRun{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   tests[i].pipelineName,
+						Labels: makePipelineRunSelectorSet(tests[i].repoURL),
+					},
+				}
+				_, err := cg.TektonClient.TektonV1alpha1().PipelineRuns(cg.Defaults.Namespace).Create(plr)
+				if err != nil {
+					t.Fatalf("Unexpected error:\n%s", err)
+				}
+			}
+			var hasErr bool
+			err := cg.deletePipelineRuns(tests[i].repoURL, cg.Defaults.Namespace, tests[i].pipelineName)
+			if err != nil {
+				hasErr = true
+			}
+			if diff := cmp.Diff(tests[i].hasErr, hasErr); diff != "" {
+				t.Fatalf("Error mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
 
-func Test_makePipelineRunSelectorSet(t *testing.T) {}
-
-// func makePipelineRunSelectorSet(repoURL *url.URL) map[string]string {
-// }
+func Test_makePipelineRunSelectorSet(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      *url.URL
+		selector map[string]string
+	}{
+		{
+			name: "Repo Selector",
+			url: &url.URL{
+				Host: "website.com",
+				Path: "/org/repo",
+			},
+			selector: map[string]string{
+				pipelineRunServerName: "website.com",
+				pipelineRunOrgName:    "org",
+				pipelineRunRepoName:   "repo",
+			},
+		},
+	}
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			selector := makePipelineRunSelectorSet(tests[i].url)
+			if diff := cmp.Diff(tests[i].selector, selector); diff != "" {
+				t.Fatalf("Selector mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
 
 func Test_createOpenshiftRoute(t *testing.T) {
 	tests := []struct {
@@ -103,10 +179,126 @@ func Test_removeWebhookTriggers(t *testing.T) {}
 // func removeWebhookTriggers(cg *client.Group, eventListener *triggersv1alpha1.EventListener, webhookName string) {
 // }
 
-func Test_newTrigger(t *testing.T) {}
-
-// func newTrigger(triggerName, bindingName, templateName, interceptorNamespace, repoURL, eventType, secretName string, params []pipelinesv1alpha1.Param) triggersv1alpha1.EventListenerTrigger {
-// }
+func Test_newTrigger(t *testing.T) {
+	tests := []struct {
+		name                 string
+		triggerName          string
+		bindingName          string
+		templateName         string
+		interceptorNamespace string
+		repoURL              string
+		eventType            string
+		secretName           string
+		params               []pipelinesv1alpha1.Param
+		trigger              triggersv1alpha1.EventListenerTrigger
+	}{
+		{
+			name:                 "New Trigger Params",
+			triggerName:          "trigger",
+			bindingName:          "binding",
+			templateName:         "template",
+			interceptorNamespace: "interceptor-namespace",
+			repoURL:              "vcs.com/org/repo",
+			eventType:            "event",
+			secretName:           "secretName",
+			params: []pipelinesv1alpha1.Param{
+				pipelinesv1alpha1.Param{
+					Name: "param",
+					Value: pipelinesv1alpha1.ArrayOrString{
+						Type:      pipelinesv1alpha1.ParamTypeString,
+						StringVal: "value",
+					},
+				},
+			},
+			trigger: triggersv1alpha1.EventListenerTrigger{
+				Name: "trigger",
+				Binding: triggersv1alpha1.EventListenerBinding{
+					Name:       "binding",
+					APIVersion: "v1alpha1",
+				},
+				Params: []pipelinesv1alpha1.Param{
+					pipelinesv1alpha1.Param{
+						Name: "param",
+						Value: pipelinesv1alpha1.ArrayOrString{
+							Type:      pipelinesv1alpha1.ParamTypeString,
+							StringVal: "value",
+						},
+					},
+				},
+				Template: triggersv1alpha1.EventListenerTemplate{
+					Name:       "template",
+					APIVersion: "v1alpha1",
+				},
+				Interceptor: &triggersv1alpha1.EventInterceptor{
+					Header: []pipelinesv1alpha1.Param{
+						{Name: WextInterceptorTriggerName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "trigger"}},
+						{Name: WextInterceptorRepoURL, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repoURL"}},
+						{Name: WextInterceptorEvent, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "event"}},
+						{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secret"}}},
+					ObjectRef: &corev1.ObjectReference{
+						APIVersion: "v1",
+						Kind:       "Service",
+						Name:       wextValidator,
+						Namespace:  "interceptor-namespace",
+					},
+				},
+			},
+		},
+		{
+			name:                 "New Trigger No Params",
+			triggerName:          "trigger",
+			bindingName:          "binding",
+			templateName:         "template",
+			interceptorNamespace: "interceptor-namespace",
+			repoURL:              "repoURL",
+			eventType:            "event",
+			secretName:           "secretName",
+			params:               nil,
+			trigger: triggersv1alpha1.EventListenerTrigger{
+				Name: "trigger",
+				Binding: triggersv1alpha1.EventListenerBinding{
+					Name:       "binding",
+					APIVersion: "v1alpha1",
+				},
+				Params: []pipelinesv1alpha1.Param{},
+				Template: triggersv1alpha1.EventListenerTemplate{
+					Name:       "template",
+					APIVersion: "v1alpha1",
+				},
+				Interceptor: &triggersv1alpha1.EventInterceptor{
+					Header: []pipelinesv1alpha1.Param{
+						{Name: WextInterceptorTriggerName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "trigger"}},
+						{Name: WextInterceptorRepoURL, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repoURL"}},
+						{Name: WextInterceptorEvent, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "event"}},
+						{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secret"}}},
+					ObjectRef: &corev1.ObjectReference{
+						APIVersion: "v1",
+						Kind:       "Service",
+						Name:       wextValidator,
+						Namespace:  "interceptor-namespace",
+					},
+				},
+			},
+		},
+	}
+	for i := range tests {
+		t.Run(tests[i].name, func(t *testing.T) {
+			trigger := newTrigger(
+				tests[i].triggerName,
+				tests[i].bindingName,
+				tests[i].templateName,
+				tests[i].interceptorNamespace,
+				tests[i].repoURL,
+				tests[i].eventType,
+				tests[i].secretName,
+				tests[i].params,
+			)
+			if diff := cmp.Diff(tests[i].trigger, trigger); diff != "" {
+				t.Errorf("Trigger mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
 
 func Test_getMonitorTriggerParams(t *testing.T) {
 	tests := []struct {
@@ -136,9 +328,6 @@ func Test_getMonitorTriggerParams(t *testing.T) {
 		})
 	}
 }
-
-// func getMonitorTriggerParams(cg *client.Group, w model.Webhook) {
-// }
 
 func Test_getPipelineTriggerParams(t *testing.T) {
 	tests := []struct {
