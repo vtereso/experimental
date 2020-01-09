@@ -30,7 +30,6 @@ import (
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/model"
 	"github.com/tektoncd/experimental/webhooks-extension/pkg/util"
-	githook "github.com/tektoncd/experimental/webhooks-extension/pkg/webhook"
 	pipelinesv1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	triggersv1alpha1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -157,12 +156,12 @@ func (cg *Group) createWebhook(request *restful.Request, response *restful.Respo
 		return
 	}
 	// Validate Git URL
-	gitURL, err := sanitizeGitURL(webhook.GitRepositoryURL)
-	if err != nil {
-		err = xerrors.Errorf("Invalid value webhook URL: %s", err)
-		util.RespondError(response, err, http.StatusBadRequest)
-		return
-	}
+	// gitURL, err := sanitizeGitURL(webhook.GitRepositoryURL)
+	// if err != nil {
+	// 	err = xerrors.Errorf("Invalid value webhook URL: %s", err)
+	// 	util.RespondError(response, err, http.StatusBadRequest)
+	// 	return
+	// }
 
 	// Check for Triggers resources
 	_, templateErr := cg.TriggersClient.TektonV1alpha1().TriggerTemplates(cg.Defaults.Namespace).Get(fmt.Sprintf("%s-%s", webhook.Pipeline, triggerTemplatePostfix), metav1.GetOptions{})
@@ -207,16 +206,16 @@ func (cg *Group) createWebhook(request *restful.Request, response *restful.Respo
 
 	// Attempt to create webhook
 	if !existingRepoWebhook {
-		accessToken, secretToken, err := getWebhookSecretTokens(cg, webhook.AccessTokenRef)
-		if err != nil {
-			util.RespondError(response, err, http.StatusInternalServerError)
-			return
-		}
-		err = githook.DoGitHubWebhookRequest(gitURL, cg.Defaults.CallbackURL, accessToken, secretToken, githook.Subscribe, webhookEvents)
-		if err != nil {
-			util.RespondError(response, err, http.StatusInternalServerError)
-			return
-		}
+		// accessToken, secretToken, err := getWebhookSecretTokens(cg, webhook.AccessTokenRef)
+		// if err != nil {
+		// 	util.RespondError(response, err, http.StatusInternalServerError)
+		// 	return
+		// }
+		// err = githook.DoGitHubWebhookRequest(gitURL, cg.Defaults.CallbackURL, accessToken, secretToken, githook.Subscribe, webhookEvents)
+		// if err != nil {
+		// 	util.RespondError(response, err, http.StatusInternalServerError)
+		// 	return
+		// }
 		logging.Log.Debug("Webhook creation succeeded")
 	}
 
@@ -319,17 +318,17 @@ func (cg *Group) deleteWebhook(request *restful.Request, response *restful.Respo
 		return
 	}
 
-	accessToken, secretToken, err := getWebhookSecretTokens(cg, deleteWebhook.AccessTokenRef)
-	if err != nil {
-		util.RespondError(response, err, http.StatusInternalServerError)
-		return
-	}
-	// Attempt to remove webhook
-	err = githook.DoGitHubWebhookRequest(gitURL, cg.Defaults.CallbackURL, accessToken, secretToken, githook.Unsubscribe, webhookEvents)
-	if err != nil {
-		util.RespondError(response, err, http.StatusInternalServerError)
-		return
-	}
+	// accessToken, secretToken, err := getWebhookSecretTokens(cg, deleteWebhook.AccessTokenRef)
+	// if err != nil {
+	// 	util.RespondError(response, err, http.StatusInternalServerError)
+	// 	return
+	// }
+	// // Attempt to remove webhook
+	// err = githook.DoGitHubWebhookRequest(gitURL, cg.Defaults.CallbackURL, accessToken, secretToken, githook.Unsubscribe, webhookEvents)
+	// if err != nil {
+	// 	util.RespondError(response, err, http.StatusInternalServerError)
+	// 	return
+	// }
 
 	// Update the EventListenerTriggers
 	removeWebhookTriggers(el, name)
