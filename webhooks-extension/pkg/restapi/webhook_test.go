@@ -33,6 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+// func Test_createWebhook(t *testing.T) {}
+
+// func Test_deleteWebhook(t *testing.T) {}
+
+// func Test_getAllWebhooks(t *testing.T) {}
+
 func Test_deletePipelineRuns(t *testing.T) {
 	tests := []struct {
 		name         string

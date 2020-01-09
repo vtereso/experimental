@@ -17,18 +17,18 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
 	logging "github.com/tektoncd/experimental/webhooks-extension/pkg/logging"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/restapi"
 )
 
 func main() {
 	logging.Log.Info("Registering all endpoints")
-	cg, err := endpoints.NewGroup()
+	cg, err := restapi.NewGroup()
 	if err != nil {
 		logging.Log.Fatal(err)
 	}
 
-	h := endpoints.NewRouter(cg)
+	h := restapi.NewRouter(cg)
 
 	port := ":8080"
 	portnum := os.Getenv("PORT")

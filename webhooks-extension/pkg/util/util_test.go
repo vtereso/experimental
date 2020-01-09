@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -145,8 +146,9 @@ func TestCreateOAuth2Client(t *testing.T) {
 		t.Run(tests[i].name, func(t *testing.T) {
 			client := CreateOAuth2Client(tests[i].ctx, tests[i].accessToken)
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				authHeader := r.Header.Get("Authorization")
-				if diff := cmp.Diff(tests[i].accessToken, authHeader); diff != "" {
+				expectedAuthHeader := fmt.Sprintf("Bearer %s", tests[i].accessToken)
+				actualAuthHeader := r.Header.Get("Authorization")
+				if diff := cmp.Diff(expectedAuthHeader, actualAuthHeader); diff != "" {
 					t.Errorf("CreateOAuth2Client() \"Authorization\" header mismatch (-want +got):\n%s", diff)
 				}
 			}))

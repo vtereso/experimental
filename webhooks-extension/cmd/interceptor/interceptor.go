@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"github.com/google/go-github/github"
-	"github.com/tektoncd/experimental/webhooks-extension/pkg/endpoints"
+	"github.com/tektoncd/experimental/webhooks-extension/pkg/restapi"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -55,7 +55,7 @@ func main() {
 	log.Print("Interceptor started")
 
 	http.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
-		foundTriggerName := request.Header.Get(endpoints.WextInterceptorTriggerName)
+		foundTriggerName := request.Header.Get(restapi.WextInterceptorTriggerName)
 
 		config, err := rest.InClusterConfig()
 		if err != nil {
@@ -72,7 +72,7 @@ func main() {
 		}
 
 		foundNamespace := os.Getenv("INSTALLED_NAMESPACE")
-		foundSecretName := request.Header.Get(endpoints.WextInterceptorSecretName)
+		foundSecretName := request.Header.Get(restapi.WextInterceptorSecretName)
 
 		foundSecret, err := clientset.CoreV1().Secrets(foundNamespace).Get(foundSecretName, metav1.GetOptions{})
 
@@ -82,7 +82,7 @@ func main() {
 			return
 		}
 
-		wantedRepoURL := request.Header.Get(endpoints.WextInterceptorRepoURL)
+		wantedRepoURL := request.Header.Get(restapi.WextInterceptorRepoURL)
 
 		payload, err := github.ValidatePayload(request, foundSecret.Data["secretToken"])
 		if err != nil {
@@ -114,8 +114,8 @@ func main() {
 		validationPassed := false
 
 		if sanitizeGitInput(cloneURL) == sanitizeGitInput(wantedRepoURL) {
-			if request.Header.Get(endpoints.WextInterceptorEvent) != "" {
-				wantedEvent := request.Header.Get(endpoints.WextInterceptorEvent)
+			if request.Header.Get(restapi.WextInterceptorEvent) != "" {
+				wantedEvent := request.Header.Get(restapi.WextInterceptorEvent)
 				foundEvent := request.Header.Get("X-Github-Event")
 				if wantedEvent == foundEvent { // Wanted GitHub event type provided AND repository URL matches so all is well
 					wantedActions := request.Header["Wext-Incoming-Actions"]
