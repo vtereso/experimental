@@ -15,12 +15,12 @@ func TestCheckHealth(t *testing.T) {
 		statusCode int
 	}{
 		{
-			name:       "Regular Path",
+			name:       "Liveness Path",
 			url:        "/liveness/",
 			statusCode: 204,
 		},
 		{
-			name:       "Regular Path",
+			name:       "Readiness Path",
 			url:        "/readiness/",
 			statusCode: 204,
 		},
@@ -28,7 +28,10 @@ func TestCheckHealth(t *testing.T) {
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
 			server := DummyServer(DummyGroup())
-			httpReq := DummyHTTPRequest("GET", fmt.Sprintf("%s%s", server.URL, tests[i].url), nil)
+			httpReq, err := DummyHTTPRequest("GET", fmt.Sprintf("%s%s", server.URL, tests[i].url), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			// Make request
 			response, err := http.DefaultClient.Do(httpReq)
 			if err != nil {

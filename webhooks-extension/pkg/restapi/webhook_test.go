@@ -47,7 +47,6 @@ func Test_deletePipelineRuns(t *testing.T) {
 		seed         bool
 		hasErr       bool
 	}{
-		// Correct
 		{
 			name: "Delete PipelineRun",
 			repoURL: &url.URL{
@@ -55,9 +54,9 @@ func Test_deletePipelineRuns(t *testing.T) {
 				Path: "/org/repo",
 			},
 			pipelineName: "pipeline",
+			seed:         true,
 			hasErr:       false,
 		},
-		// Incorrect
 		{
 			name: "No PipelineRuns",
 			repoURL: &url.URL{
@@ -65,7 +64,8 @@ func Test_deletePipelineRuns(t *testing.T) {
 				Path: "/org/repo",
 			},
 			pipelineName: "pipeline",
-			hasErr:       true,
+			seed:         false,
+			hasErr:       false,
 		},
 	}
 	for i := range tests {
@@ -126,6 +126,7 @@ func Test_makePipelineRunSelectorSet(t *testing.T) {
 }
 
 func Test_createOpenshiftRoute(t *testing.T) {
+	cg := DummyGroup()
 	tests := []struct {
 		name        string
 		serviceName string
@@ -137,7 +138,8 @@ func Test_createOpenshiftRoute(t *testing.T) {
 			serviceName: "route",
 			route: &routesv1.Route{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "route",
+					Name:      "route",
+					Namespace: cg.Defaults.Namespace,
 				},
 				Spec: routesv1.RouteSpec{
 					To: routesv1.RouteTargetReference{
@@ -151,7 +153,6 @@ func Test_createOpenshiftRoute(t *testing.T) {
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
-			cg := DummyGroup()
 			var hasErr bool
 			if err := cg.createOpenshiftRoute(tests[i].serviceName); err != nil {
 				hasErr = true
@@ -295,7 +296,7 @@ func Test_addWebhookTriggers(t *testing.T) {
 						{Name: wextTargetNamespace, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "ns"}},
 						{Name: wextServiceAccount, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "sa"}},
 						{Name: wextDockerRegistry, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "dr"}},
-						{Name: wextGitServer, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "https://vcs.com"}},
+						{Name: wextGitServer, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "vcs.com"}},
 						{Name: wextGitOrg, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "org"}},
 						{Name: wextGitRepo, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repo"}},
 					},
@@ -327,7 +328,7 @@ func Test_addWebhookTriggers(t *testing.T) {
 						{Name: wextTargetNamespace, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "ns"}},
 						{Name: wextServiceAccount, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "sa"}},
 						{Name: wextDockerRegistry, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "dr"}},
-						{Name: wextGitServer, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "https://vcs.com"}},
+						{Name: wextGitServer, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "vcs.com"}},
 						{Name: wextGitOrg, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "org"}},
 						{Name: wextGitRepo, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repo"}},
 					},
@@ -453,7 +454,7 @@ func Test_newTrigger(t *testing.T) {
 			bindingName:          "binding",
 			templateName:         "template",
 			interceptorNamespace: "interceptor-namespace",
-			repoURL:              "vcs.com/org/repo",
+			repoURL:              "repoURL",
 			eventType:            "event",
 			secretName:           "secretName",
 			params: []pipelinesv1alpha1.Param{
@@ -489,7 +490,7 @@ func Test_newTrigger(t *testing.T) {
 						{Name: WextInterceptorTriggerName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "trigger"}},
 						{Name: WextInterceptorRepoURL, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repoURL"}},
 						{Name: WextInterceptorEvent, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "event"}},
-						{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secret"}}},
+						{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secretName"}}},
 					ObjectRef: &corev1.ObjectReference{
 						APIVersion: "v1",
 						Kind:       "Service",
@@ -515,7 +516,7 @@ func Test_newTrigger(t *testing.T) {
 					Name:       "binding",
 					APIVersion: "v1alpha1",
 				},
-				Params: []pipelinesv1alpha1.Param{},
+				Params: nil,
 				Template: triggersv1alpha1.EventListenerTemplate{
 					Name:       "template",
 					APIVersion: "v1alpha1",
@@ -525,7 +526,7 @@ func Test_newTrigger(t *testing.T) {
 						{Name: WextInterceptorTriggerName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "trigger"}},
 						{Name: WextInterceptorRepoURL, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "repoURL"}},
 						{Name: WextInterceptorEvent, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "event"}},
-						{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secret"}}},
+						{Name: WextInterceptorSecretName, Value: pipelinesv1alpha1.ArrayOrString{Type: pipelinesv1alpha1.ParamTypeString, StringVal: "secretName"}}},
 					ObjectRef: &corev1.ObjectReference{
 						APIVersion: "v1",
 						Kind:       "Service",
@@ -1095,11 +1096,10 @@ func Test_getWebhooksFromEventListener(t *testing.T) {
 		t.Run(tests[i].name, func(t *testing.T) {
 			cg := DummyGroup()
 			el := getBaseEventListener(cg.Defaults.Namespace)
-			t.Log("Trigger spec:", el.Spec.Triggers)
 			for _, webhook := range tests[i].webhooks {
 				addWebhookTriggers(cg, el, webhook)
 			}
-			webhooks := getWebhooksFromEventListener(*el)
+			webhooks := getWebhooksFromEventListener(el)
 			if diff := cmp.Diff(tests[i].webhooks, webhooks); diff != "" {
 				t.Errorf("Webhooks mismatch (-want +got):\n%s", diff)
 			}
@@ -1252,8 +1252,8 @@ func Test_getWebhookSecretTokens(t *testing.T) {
 		{
 			name:        "No Seeded Secret",
 			secretName:  "secret",
-			accessToken: "accessToken",
-			secretToken: "secretToken",
+			accessToken: "",
+			secretToken: "",
 			hasErr:      true,
 		},
 		{
@@ -1268,8 +1268,8 @@ func Test_getWebhookSecretTokens(t *testing.T) {
 				},
 			},
 			secretName:  "secret",
-			accessToken: "accessToken",
-			secretToken: "secretToken",
+			accessToken: "",
+			secretToken: "",
 			hasErr:      true,
 		},
 		{
@@ -1284,8 +1284,8 @@ func Test_getWebhookSecretTokens(t *testing.T) {
 				},
 			},
 			secretName:  "secret",
-			accessToken: "accessToken",
-			secretToken: "secretToken",
+			accessToken: "",
+			secretToken: "",
 			hasErr:      true,
 		},
 	}
@@ -1511,12 +1511,16 @@ func Test_getDashboardURL(t *testing.T) {
 					t.Fatal(err)
 				}
 				if tests[i].mock {
-					defer gock.Disable()
+					name := tests[i].seedService.Name
+					scheme := tests[i].seedService.Spec.Ports[0].Name
+					port := tests[i].seedService.Spec.Ports[0].Port
+					dashboardURL := fmt.Sprintf("%s://%s:%d/v1/namespaces/%s/endpoints", scheme, name, port, cg.Defaults.Namespace)
 
-					gock.New(tests[i].dashboardURL).
+					defer gock.Disable()
+					gock.New(dashboardURL).
 						Get("/").
 						Reply(200).
-						JSON(fmt.Sprintf(`"url": "%s"`, tests[i].dashboardURL))
+						JSON(fmt.Sprintf(`[{"url": "%s"}]`, tests[i].dashboardURL))
 				}
 			}
 			dashboardURL := cg.getDashboardURL()

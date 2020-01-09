@@ -46,12 +46,15 @@ func dummyDefaults() EnvDefaults {
 	}
 }
 
-// DummyHTTPRequest reurns a new http with the specified method, url and body.
-// The content type is also set to JSON
-func DummyHTTPRequest(method string, url string, body io.Reader) *http.Request {
-	httpReq := httptest.NewRequest(method, url, body)
+// DummyHTTPRequest attempts to return a new HTTP client request with the
+// specified method, url and body and content type set to JSON.
+func DummyHTTPRequest(method string, url string, body io.Reader) (*http.Request, error) {
+	httpReq, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	return httpReq
+	return httpReq, nil
 }
 
 // DummyServer return a new httptest server and the client group used within

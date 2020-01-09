@@ -183,7 +183,7 @@ func (cg *Group) createWebhook(request *restful.Request, response *restful.Respo
 	eventListenerExists := (err == nil)
 	existingRepoWebhook := false
 	if eventListenerExists {
-		existingHooks := getWebhooksFromEventListener(*el)
+		existingHooks := getWebhooksFromEventListener(el)
 		// Check if webhook exists already
 		for _, existingHook := range existingHooks {
 			if webhook.Name == existingHook.Name {
@@ -309,7 +309,7 @@ func (cg *Group) deleteWebhook(request *restful.Request, response *restful.Respo
 		util.RespondError(response, err, http.StatusInternalServerError)
 		return
 	}
-	webhooks := getWebhooksFromEventListener(*el)
+	webhooks := getWebhooksFromEventListener(el)
 	// List of webhooks on repository
 	webhooks = filterWebhooksByRepo(webhooks, repo)
 	deleteWebhook, err := findWebhookByName(webhooks, name)
@@ -363,7 +363,7 @@ func (cg *Group) getAllWebhooks(request *restful.Request, response *restful.Resp
 		util.RespondError(response, err, http.StatusInternalServerError)
 		return
 	}
-	webhooks := getWebhooksFromEventListener(*el)
+	webhooks := getWebhooksFromEventListener(el)
 	response.WriteEntity(webhooks)
 }
 
@@ -704,13 +704,14 @@ func (cg *Group) deleteEventListener() error {
 // getWebhooksFromEventListener returns all the webhooks on the EventListener.
 // When webhooks are created, multiple triggers are created with identical
 // information so the pull trigger is arbitrary choosen to represent the webhook
-func getWebhooksFromEventListener(el triggersv1alpha1.EventListener) []model.Webhook {
+func getWebhooksFromEventListener(el *triggersv1alpha1.EventListener) []model.Webhook {
 	logging.Log.Info("Getting webhooks from eventlistener")
 	hooks := []model.Webhook{}
 	for _, trigger := range el.Spec.Triggers {
 		if isWebhookTrigger(trigger) && strings.HasSuffix(trigger.Name, pullTriggerBindingPostfix) {
 			if hook, err := triggerToWebhook(trigger); err != nil {
 				logging.Log.Debug(err)
+			} else {
 				hooks = append(hooks, *hook)
 			}
 		}
@@ -743,7 +744,7 @@ func getGitValues(u url.URL) (server, org, repo string) {
 }
 
 // getWebhookSecretTokens attempts to return the accessToken and secretToken
-// stored in the Secret
+// stored in the Secret. If either value does not exist, an error is returned
 func getWebhookSecretTokens(cg *Group, secretName string) (aToken string, sToken string, err error) {
 	secret, err := cg.K8sClient.CoreV1().Secrets(cg.Defaults.Namespace).Get(secretName, metav1.GetOptions{})
 	if err != nil {

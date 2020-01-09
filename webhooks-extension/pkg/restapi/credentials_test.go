@@ -29,10 +29,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func init() {
-	src = rand.NewSource(0)
-}
-
 func Test_createCredential(t *testing.T) {
 	tests := []struct {
 		name string
@@ -51,7 +47,7 @@ func Test_createCredential(t *testing.T) {
 			},
 			seed:            false,
 			statusCode:      201,
-			contentLocation: "/webhooks/cred",
+			contentLocation: "/webhooks/credentials/cred",
 		},
 		// Incorrect
 		{
@@ -101,7 +97,10 @@ func Test_createCredential(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Error marshalling response body: %s", err)
 			}
-			httpReq := DummyHTTPRequest("POST", fmt.Sprintf("%s/webhooks/credentials", server.URL), bytes.NewBuffer(jsonBytes))
+			httpReq, err := DummyHTTPRequest("POST", fmt.Sprintf("%s/webhooks/credentials", server.URL), bytes.NewBuffer(jsonBytes))
+			if err != nil {
+				t.Fatal(err)
+			}
 			// Make request
 			response, err := http.DefaultClient.Do(httpReq)
 			if err != nil {
@@ -168,7 +167,10 @@ func Test_deleteCredential(t *testing.T) {
 					t.Fatalf("Error seeding resource: %s", err)
 				}
 			}
-			httpReq := DummyHTTPRequest("DELETE", fmt.Sprintf("%s%s", server.URL, tests[i].url), nil)
+			httpReq, err := DummyHTTPRequest("DELETE", fmt.Sprintf("%s%s", server.URL, tests[i].url), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			// Make request
 			response, err := http.DefaultClient.Do(httpReq)
 			if err != nil {
@@ -183,6 +185,7 @@ func Test_deleteCredential(t *testing.T) {
 }
 
 func Test_getAllCredentials(t *testing.T) {
+	seededSecretToken := "Ze7gKS3PSbsRMjIFYHmz"
 	tests := []struct {
 		name        string
 		credentials []model.CredentialResponse
@@ -201,7 +204,7 @@ func Test_getAllCredentials(t *testing.T) {
 						Name:        "cred1",
 						AccessToken: "accessToken",
 					},
-					SecretToken: "Ze7gKS3PSbsRMjIFYHmz",
+					SecretToken: seededSecretToken,
 				},
 			},
 			statusCode: http.StatusOK,
@@ -214,14 +217,14 @@ func Test_getAllCredentials(t *testing.T) {
 						Name:        "cred1",
 						AccessToken: "accessToken",
 					},
-					SecretToken: "Ze7gKS3PSbsRMjIFYHmz",
+					SecretToken: seededSecretToken,
 				},
 				model.CredentialResponse{
 					CredentialRequest: model.CredentialRequest{
 						Name:        "cred2",
 						AccessToken: "accessToken",
 					},
-					SecretToken: "Ze7gKS3PSbsRMjIFYHmz",
+					SecretToken: seededSecretToken,
 				},
 			},
 			statusCode: http.StatusOK,
@@ -249,7 +252,10 @@ func Test_getAllCredentials(t *testing.T) {
 				}
 			}
 			// Intialize request
-			httpReq := DummyHTTPRequest("GET", fmt.Sprintf("%s/webhooks/credentials", server.URL), nil)
+			httpReq, err := DummyHTTPRequest("GET", fmt.Sprintf("%s/webhooks/credentials", server.URL), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			// Make request
 			response, err := http.DefaultClient.Do(httpReq)
 			if err != nil {
@@ -297,7 +303,7 @@ func Test_credentialRequestToSecret(t *testing.T) {
 				Type: corev1.SecretTypeOpaque,
 				Data: map[string][]byte{
 					AccessToken: []byte("token1"),
-					SecretToken: util.GetRandomToken(src),
+					SecretToken: []byte("sJyQs22cRR81AZcI3qh2"),
 				},
 			},
 		},
@@ -316,13 +322,14 @@ func Test_credentialRequestToSecret(t *testing.T) {
 				Type: corev1.SecretTypeOpaque,
 				Data: map[string][]byte{
 					AccessToken: []byte("token2"),
-					SecretToken: util.GetRandomToken(src),
+					SecretToken: []byte("sJyQs22cRR81AZcI3qh2"),
 				},
 			},
 		},
 	}
 	for i := range tests {
 		t.Run(tests[i].name, func(t *testing.T) {
+			src = rand.NewSource(0)
 			secret := credentialRequestToSecret(tests[i].cred, tests[i].namespace)
 			if diff := cmp.Diff(tests[i].secret, secret); diff != "" {
 				t.Errorf("Secret mismatch (-want +got):\n%s", diff)
